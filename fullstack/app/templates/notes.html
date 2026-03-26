@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Learning Records</h2>
+  <p>Markdown notes, bidirectional incident/training links, and version rollback are available via API endpoints.</p>
+  <table>
+    <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Depot Scope</th><th>Updated</th></tr></thead>
+    <tbody>
+      {% for note in notes %}
+      <tr><td>{{ note.title }}</td><td>{{ note.note_type }}</td><td>{{ note.owner }}</td><td>{{ note.depot_scope or 'Unscoped' }}</td><td>{{ note.updated_at }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

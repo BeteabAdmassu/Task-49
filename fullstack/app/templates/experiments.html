@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Supervisor Experiment Controls</h2>
+  <table>
+    <thead><tr><th>Widget</th><th>Status</th><th>Label A</th><th>Label B</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for exp in experiments %}
+      <tr>
+        <td>{{ exp.widget_key }}</td>
+        <td>{{ 'Enabled' if exp.enabled else 'Disabled' }}</td>
+        <td>{{ exp.label_a }}</td>
+        <td>{{ exp.label_b }}</td>
+        <td>
+          <form method="post" action="{{ url_for('toggle_experiment', exp_id=exp.id) }}">
+            <input type="hidden" name="enabled" value="{{ 0 if exp.enabled else 1 }}">
+            <button>{{ 'Disable' if exp.enabled else 'Enable' }}</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

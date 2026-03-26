@@ -1,0 +1,9 @@
+<table>
+  <thead><tr><th>Route</th><th>Active Vehicles (last 2 min)</th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr><td>{{ row.code }}</td><td>{{ row.active_vehicles }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="last-updated">Last updated at {{ last_updated }}</p>

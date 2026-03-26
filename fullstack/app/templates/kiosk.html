@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Rider Kiosk</h2>
+  <div class="stack inline">
+    <label>Route
+      <select id="route-code">
+        <option value="">All routes</option>
+        {% for route in routes %}<option value="{{ route.code }}">{{ route.code }}</option>{% endfor %}
+      </select>
+    </label>
+    <button onclick="searchDepartures()">Search Departures</button>
+  </div>
+  <div id="departure-results"></div>
+</section>
+
+<section class="panel">
+  <h2>Create Booking</h2>
+  <div class="stack">
+    <label>Departure ID <input id="booking-departure-id" type="number" min="1" required></label>
+    <label>Seats <input id="booking-seats" type="number" min="1" value="1"></label>
+    <label>Product Type
+      <select id="booking-product-type">
+        <option value="single">Single</option>
+        <option value="commuter_bundle">Commuter Bundle</option>
+      </select>
+    </label>
+    <label>Bundle Days <input id="booking-bundle-days" type="number" min="1" value="1"></label>
+    <label>Contact <input id="booking-contact" placeholder="email or phone"></label>
+    <button onclick="startHold()">Hold Seat (8 min)</button>
+    <div id="booking-status" class="hint"></div>
+    <button id="confirm-booking-btn" onclick="confirmBooking()" disabled>Confirm Booking</button>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Next-Stop Arrival List</h2>
+  <div
+    hx-get="{{ url_for('arrival_board') }}"
+    hx-trigger="load, every 10s"
+    hx-swap="innerHTML">
+    Loading arrival list...
+  </div>
+</section>
+
+<script>
+  let activeHoldNonce = null;
+  let holdDeadlineMs = null;
+  let countdownTimer = null;
+
+  function setBookingStatus(message) {
+    document.getElementById("booking-status").textContent = message;
+  }
+
+  function startCountdown() {
+    if (countdownTimer) clearInterval(countdownTimer);
+    countdownTimer = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((holdDeadlineMs - Date.now()) / 1000));
+      const minutes = Math.floor(remaining / 60);
+      const seconds = String(remaining % 60).padStart(2, "0");
+      setBookingStatus(`Hold active. Expires in ${minutes}:${seconds}`);
+      if (remaining <= 0) {
+        clearInterval(countdownTimer);
+        activeHoldNonce = null;
+        document.getElementById("confirm-booking-btn").disabled = true;
+        setBookingStatus("Seat hold expired. Start a new hold.");
+      }
+    }, 1000);
+  }
+
+  async function startHold() {
+    const payload = {
+      departure_id: Number(document.getElementById("booking-departure-id").value),
+      seats: Number(document.getElementById("booking-seats").value || 1),
+      product_type: document.getElementById("booking-product-type").value,
+      bundle_days: Number(document.getElementById("booking-bundle-days").value || 1),
+    };
+    const response = await fetch("/api/kiosk/bookings/hold", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setBookingStatus(data.error || "Unable to hold seat.");
+      document.getElementById("confirm-booking-btn").disabled = true;
+      return;
+    }
+
+    activeHoldNonce = data.hold_nonce;
+    holdDeadlineMs = Date.parse(data.expires_at);
+    document.getElementById("confirm-booking-btn").disabled = false;
+    startCountdown();
+  }
+
+  async function confirmBooking() {
+    if (!activeHoldNonce) {
+      setBookingStatus("No active hold. Start hold first.");
+      return;
+    }
+
+    const nonceRes = await fetch("/api/kiosk/security/nonce", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action: "booking_confirm" }),
+    });
+    const nonceData = await nonceRes.json();
+    if (!nonceRes.ok) {
+      setBookingStatus(nonceData.error || "Nonce request failed.");
+      return;
+    }
+
+    const confirmRes = await fetch("/api/kiosk/bookings/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        hold_nonce: activeHoldNonce,
+        request_nonce: nonceData.nonce,
+        contact: document.getElementById("booking-contact").value,
+      }),
+    });
+    const confirmData = await confirmRes.json();
+    if (!confirmRes.ok) {
+      setBookingStatus(confirmData.error || "Booking confirmation failed.");
+      return;
+    }
+
+    activeHoldNonce = null;
+    document.getElementById("confirm-booking-btn").disabled = true;
+    if (countdownTimer) clearInterval(countdownTimer);
+    setBookingStatus(`Booking confirmed. Total: $${confirmData.total_price}`);
+    searchDepartures();
+  }
+
+  async function searchDepartures() {
+    const routeCode = document.getElementById("route-code").value;
+    const res = await fetch(`/api/departures/search?route_code=${encodeURIComponent(routeCode)}`);
+    const rows = await res.json();
+    const target = document.getElementById("departure-results");
+    target.innerHTML = rows.map((row) => `
+      <div class="result-card">
+        <strong>${row.route}</strong> ${row.origin} to ${row.destination}<br>
+        Departure: ${row.departure_time}<br>
+        Seats remaining: ${row.seats_remaining}<br>
+        Base price: $${row.base_price}
+      </div>
+    `).join("") || "No departures found.";
+  }
+  searchDepartures();
+</script>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Operational Analytics</h2>
+  <ul>
+    <li>CTR: {{ ctr }}</li>
+    <li>Conversion to booking: {{ conversion }}</li>
+    <li>7-day return usage: {{ return_usage }}</li>
+  </ul>
+  <h3>Offline Ranking Metrics</h3>
+  <ul>
+    <li>Precision: {{ rank.precision or 0 }}</li>
+    <li>Recall: {{ rank.recall or 0 }}</li>
+    <li>NDCG: {{ rank.ndcg or 0 }}</li>
+    <li>Coverage: {{ rank.coverage or 0 }}</li>
+    <li>Diversity: {{ rank.diversity or 0 }}</li>
+  </ul>
+</section>
+{% endblock %}

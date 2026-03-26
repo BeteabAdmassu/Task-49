@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid">
+  <article class="panel">
+    <h2>Service Visibility</h2>
+    <div
+      id="arrival-board"
+      hx-get="{{ url_for('arrival_board') }}"
+      hx-trigger="load, every 10s"
+      hx-swap="innerHTML">
+      Loading arrivals...
+    </div>
+  </article>
+
+  <article class="panel">
+    <h2>Route Vehicle Distribution</h2>
+    <div
+      id="route-distribution"
+      hx-get="{{ url_for('route_distribution') }}"
+      hx-trigger="load, every 10s"
+      hx-swap="innerHTML">
+      Loading distribution...
+    </div>
+  </article>
+
+  <article class="panel">
+    <h2>Reservation Seat Availability</h2>
+    <label>Departure
+      <select id="departure-select" onchange="refreshSeatAvailability()">
+        {% for departure in departures %}
+          <option value="{{ departure.id }}">{{ departure.code }} @ {{ departure.departure_time }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div id="seat-availability">Select a departure.</div>
+  </article>
+
+  <article class="panel">
+    <h2>Operations</h2>
+    <p>Recommendation widget version: <strong id="exp-label">Loading...</strong></p>
+    <ul>
+      <li><a href="{{ url_for('kiosk') }}">Rider Kiosk</a></li>
+      <li><a href="{{ url_for('notes_index') }}">Learning Records</a></li>
+      {% if user.role in ['supervisor', 'admin'] %}
+      <li><a href="{{ url_for('supervisor_experiments') }}">Experiment Controls</a></li>
+      <li><a href="{{ url_for('analyst_metrics') }}">Analytics Dashboard</a></li>
+      {% endif %}
+      <li><a href="{{ url_for('profile', user_id=user.id) }}">My Profile</a></li>
+    </ul>
+  </article>
+</section>
+
+<script>
+  function refreshSeatAvailability() {
+    const departureId = document.getElementById("departure-select").value;
+    htmx.ajax("GET", `/api/seat-availability/${departureId}`, "#seat-availability");
+  }
+  refreshSeatAvailability();
+
+  async function loadExperimentLabel() {
+    try {
+      const response = await fetch("/api/experiments/assign/suggested-times");
+      const data = await response.json();
+      document.getElementById("exp-label").textContent = data.label;
+    } catch (_err) {
+      document.getElementById("exp-label").textContent = "Version A";
+    }
+  }
+  loadExperimentLabel();
+</script>
+{% endblock %}

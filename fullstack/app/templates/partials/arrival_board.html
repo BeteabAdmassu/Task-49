@@ -1,0 +1,14 @@
+<table>
+  <thead><tr><th>Route</th><th>Next Stop</th><th>ETA</th><th>Mode</th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      <td>{{ row.route_code }}</td>
+      <td>{{ row.stop_name }}</td>
+      <td>{{ row.eta_display }}</td>
+      <td>{{ row.mode }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="last-updated">Last updated at {{ last_updated }}</p>

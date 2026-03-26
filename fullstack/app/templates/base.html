@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MetroOps Portal</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>MetroOps Shuttle & Depot Portal</h1>
+    {% if session.user_id %}
+      <form method="post" action="{{ url_for('logout') }}"><button>Logout</button></form>
+    {% endif %}
+  </header>
+  <div id="offline-banner" class="offline hidden">Offline&mdash;showing last known data</div>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

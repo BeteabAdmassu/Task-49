@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Employee Profile: {{ owner.username }}</h2>
+  {% if mutual %}
+    <p>Mutual follow active. Extra fields unlocked.</p>
+    <ul>
+      <li>Role: {{ owner.role }}</li>
+      <li>Depot Assignment: {{ owner.depot_assignment }}</li>
+    </ul>
+  {% else %}
+    <p>Mutual follow required to unlock role and depot assignment details.</p>
+  {% endif %}
+  {% if masked_face %}
+    <p>Face identifier (masked): {{ masked_face }}</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+data/*.db
+data/*.key
+data/attachments/*
+!data/attachments/.keep
