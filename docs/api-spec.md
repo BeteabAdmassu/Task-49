@@ -23,6 +23,8 @@
 | GET | `/api/notes/rollup` | Cross-task rollup summary | - | JSON list |
 | POST | `/api/social/action` | Follow/block/report/favorite/like operations | `target_user_id,relation` | `{ ok }` |
 | GET | `/api/experiments/assign/<widget_key>` | Deterministic 50/50 A/B assignment | `widget_key` | `{ variant,label }` |
+| GET | `/reports` | HR/Admin governance report dashboard | - | HTML page |
+| POST | `/admin/users` | Admin local user provisioning with password policy | `username,password,role,depot_assignment` | `{ ok }` |
 
 Notes:
 - `GET /api/heartbeat` now returns HTTP `429` after more than 30 refresh attempts/minute/user/screen.

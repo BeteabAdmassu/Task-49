@@ -2,7 +2,7 @@
 {% block content %}
 <section class="panel">
   <h2>Learning Records</h2>
-  <p>Markdown notes, bidirectional incident/training links, and version rollback are available via API endpoints.</p>
+  <p>Markdown notes with create/update, attachment upload, linking, and rollback actions.</p>
   <table>
     <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Depot Scope</th><th>Updated</th></tr></thead>
     <tbody>
@@ -12,4 +12,99 @@
     </tbody>
   </table>
 </section>
+
+<section class="panel">
+  <h3>Create / Update Note</h3>
+  <div class="stack">
+    <label>Note ID (leave blank to create) <input id="note-id" type="number" min="1"></label>
+    <label>Title <input id="note-title"></label>
+    <label>Type
+      <select id="note-type">
+        <option value="training">training</option>
+        <option value="incident">incident</option>
+      </select>
+    </label>
+    <label>Markdown <textarea id="note-content" rows="6"></textarea></label>
+    <button onclick="saveNote()">Save Note</button>
+  </div>
+  <h3>Attachment Upload</h3>
+  <div class="stack inline">
+    <label>Note ID <input id="attach-note-id" type="number" min="1"></label>
+    <label>File <input id="attach-file" type="file"></label>
+    <button onclick="uploadAttachment()">Upload</button>
+  </div>
+  <h3>Link Notes</h3>
+  <div class="stack inline">
+    <label>From ID <input id="link-from" type="number" min="1"></label>
+    <label>To ID <input id="link-to" type="number" min="1"></label>
+    <button onclick="linkNotes()">Create Link</button>
+  </div>
+  <h3>Rollback</h3>
+  <div class="stack inline">
+    <label>Note ID <input id="rollback-note-id" type="number" min="1"></label>
+    <label>Version No <input id="rollback-version" type="number" min="1"></label>
+    <button onclick="rollbackNote()">Rollback</button>
+  </div>
+  <p id="notes-status" class="hint"></p>
+</section>
+
+<script>
+  function setStatus(message) {
+    document.getElementById("notes-status").textContent = message;
+  }
+
+  async function saveNote() {
+    const idValue = document.getElementById("note-id").value;
+    const payload = {
+      title: document.getElementById("note-title").value,
+      note_type: document.getElementById("note-type").value,
+      content_md: document.getElementById("note-content").value,
+    };
+    if (idValue) payload.id = Number(idValue);
+    const res = await fetch("/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setStatus(res.ok ? `Saved note #${data.id}` : (data.error || "Save failed"));
+  }
+
+  async function uploadAttachment() {
+    const noteId = Number(document.getElementById("attach-note-id").value);
+    const file = document.getElementById("attach-file").files[0];
+    if (!noteId || !file) {
+      setStatus("Note ID and file are required.");
+      return;
+    }
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`/api/notes/${noteId}/attachments`, { method: "POST", body: form });
+    const data = await res.json();
+    setStatus(res.ok ? "Attachment uploaded" : (data.error || "Upload failed"));
+  }
+
+  async function linkNotes() {
+    const payload = {
+      from_note_id: Number(document.getElementById("link-from").value),
+      to_note_id: Number(document.getElementById("link-to").value),
+      link_type: "related",
+    };
+    const res = await fetch("/api/notes/link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setStatus(res.ok ? "Notes linked" : (data.error || "Link failed"));
+  }
+
+  async function rollbackNote() {
+    const noteId = Number(document.getElementById("rollback-note-id").value);
+    const versionNo = Number(document.getElementById("rollback-version").value);
+    const res = await fetch(`/api/notes/${noteId}/rollback/${versionNo}`, { method: "POST" });
+    const data = await res.json();
+    setStatus(res.ok ? "Rollback completed" : (data.error || "Rollback failed"));
+  }
+</script>
 {% endblock %}

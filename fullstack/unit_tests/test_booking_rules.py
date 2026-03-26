@@ -1,5 +1,6 @@
 import importlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 
@@ -57,6 +58,18 @@ def test_booking_window_and_inventory_lock(tmp_path):
     assert out_of_window.status_code == 422
     assert "more than 30 days" in out_of_window.get_json()["error"]
 
+    with app.app_context():
+        db = app.get_db()
+        db.execute(
+            "UPDATE departures SET departure_time=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(minutes=90)).isoformat(), dep_id),
+        )
+        db.commit()
+
+    too_soon = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    assert too_soon.status_code == 422
+    assert "at least 2 hours" in too_soon.get_json()["error"]
+
 
 def test_booking_confirm_nonce_and_bundle_rule(tmp_path):
     client, app = build_client(tmp_path)
@@ -96,3 +109,87 @@ def test_booking_confirm_nonce_and_bundle_rule(tmp_path):
         json={"hold_nonce": hold_json["hold_nonce"], "request_nonce": nonce, "contact": "rider@example.com"},
     )
     assert replay.status_code == 409
+
+
+def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    with app.app_context():
+        db = app.get_db()
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        db.execute(
+            "UPDATE departures SET departure_time=?, base_price=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=5)).isoformat(), 20.0, dep_id),
+        )
+        db.execute("DELETE FROM rate_plans")
+        today = datetime.now(UTC).date().isoformat()
+        db.execute(
+            "INSERT INTO rate_plans (name,start_date,end_date,amount_delta) VALUES (?,?,?,?)",
+            ("Test Delta", today, today, 5.0),
+        )
+        db.commit()
+
+    hold = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 2})
+    assert hold.status_code == 200
+    hold_nonce = hold.get_json()["hold_nonce"]
+
+    nonce = client.post("/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    with app.app_context():
+        app.get_db().execute(
+            "UPDATE sessions_nonce SET expires_at=? WHERE nonce=?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), nonce),
+        )
+        app.get_db().commit()
+    expired_nonce = client.post(
+        "/api/bookings/confirm",
+        json={"hold_nonce": hold_nonce, "request_nonce": nonce, "contact": "rider@example.com"},
+    )
+    assert expired_nonce.status_code == 409
+
+    with app.app_context():
+        app.get_db().execute(
+            "UPDATE seat_holds SET expires_at=? WHERE nonce=?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), hold_nonce),
+        )
+        app.get_db().commit()
+
+    nonce2 = client.post("/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    expired_hold = client.post(
+        "/api/bookings/confirm",
+        json={"hold_nonce": hold_nonce, "request_nonce": nonce2, "contact": "rider@example.com"},
+    )
+    assert expired_hold.status_code == 410
+
+    fresh_hold = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    fresh_nonce = client.post("/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    confirmed = client.post(
+        "/api/bookings/confirm",
+        json={"hold_nonce": fresh_hold.get_json()["hold_nonce"], "request_nonce": fresh_nonce, "contact": "rider@example.com"},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["total_price"] == 25.0
+
+
+def test_concurrent_holds_prevent_overbooking(tmp_path):
+    client_a, app = build_client(tmp_path)
+    client_b = app.test_client()
+    login_agent(client_a)
+    login_agent(client_b)
+
+    with app.app_context():
+        db = app.get_db()
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        db.execute(
+            "UPDATE departures SET departure_time=?, total_seats=1 WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
+        )
+        db.commit()
+
+    def hold(client):
+        return client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(hold, [client_a, client_b]))
+
+    assert sorted(results) == [200, 409]

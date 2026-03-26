@@ -13,7 +13,7 @@ python -m pip install -r requirements.txt
 2. Run with local TLS (self-signed):
 
 ```bash
-python app/app.py
+python -m app.app
 ```
 
 3. Open `https://localhost:5000`.
@@ -34,10 +34,13 @@ python app/app.py
 - TLS enforcement (set `DISABLE_TLS_ENFORCEMENT=1` for local tests only).
 - Risk events: impossible speed jumps and excessive refresh attempts.
 - Notes are depot-scoped for non-HR/non-admin users.
+- HTMX is vendored locally in `app/static/vendor/htmx.min.js` for offline operation.
 
 ## Maintainability Updates
 
 - Database bootstrap and migration logic moved to `app/db_bootstrap.py` to reduce `app.py` coupling.
+- Collaboration/knowledge routes (notes, social, experiments, metrics) moved to `app/routes_collab.py`.
+- Operations routes (arrival board, booking, kiosk booking, depot inventory, ping ingest) moved to `app/routes_ops.py`.
 - Runtime cache/artifact files are ignored via `fullstack/.gitignore`.
 
 ## Tests

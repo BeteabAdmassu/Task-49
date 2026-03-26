@@ -1,5 +1,3 @@
-import csv
-import hashlib
 import json
 import os
 import secrets
@@ -22,12 +20,21 @@ from flask import (
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
-from werkzeug.utils import secure_filename
 
 try:
     from .db_bootstrap import initialize_database
 except ImportError:
     from db_bootstrap import initialize_database
+
+try:
+    from .routes_collab import register_collab_routes
+except ImportError:
+    from routes_collab import register_collab_routes
+
+try:
+    from .routes_ops import register_ops_routes
+except ImportError:
+    from routes_ops import register_ops_routes
 
 try:
     import markdown
@@ -356,7 +363,7 @@ def create_app():
         ):
             secure = request.is_secure or request.headers.get("X-Forwarded-Proto") == "https"
             if not secure:
-                abort(426, description="TLS is required")
+                return jsonify({"error": "TLS is required"}), 426
 
         if session.get("user_id"):
             now = utc_now()
@@ -425,6 +432,33 @@ def create_app():
         session.clear()
         return redirect(url_for("login"))
 
+    @app.post("/admin/users")
+    @login_required
+    @require_permission("admin:all")
+    def admin_create_user():
+        payload = request.get_json(force=True)
+        username = (payload.get("username") or "").strip()
+        password = payload.get("password") or ""
+        role = payload.get("role") or "employee"
+        depot_assignment = payload.get("depot_assignment") or "Unassigned"
+        if not username:
+            return jsonify({"error": "Username required"}), 422
+        if role not in {"employee", "supervisor", "hr", "admin"}:
+            return jsonify({"error": "Invalid role"}), 422
+        policy_error = password_policy_error(password)
+        if policy_error:
+            return jsonify({"error": policy_error}), 422
+        db = get_db()
+        exists = db.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone()
+        if exists:
+            return jsonify({"error": "Username already exists"}), 409
+        db.execute(
+            "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
+            (username, generate_password_hash(password), role, depot_assignment, to_iso(utc_now())),
+        )
+        db.commit()
+        return jsonify({"ok": True}), 201
+
     @app.get("/dashboard")
     @login_required
     def dashboard():
@@ -435,634 +469,83 @@ def create_app():
         ).fetchall()
         return render_template("dashboard.html", user=user, routes=routes, departures=departures)
 
+    @app.get("/reports")
+    @login_required
+    @require_permission("reports:view")
+    def reports_index():
+        db = get_db()
+        now = utc_now()
+        since = to_iso(now - timedelta(days=7))
+        risk_rows = db.execute(
+            """
+            SELECT event_type, COUNT(*) AS total
+            FROM risk_events
+            WHERE created_at >= ?
+            GROUP BY event_type
+            ORDER BY total DESC
+            """,
+            (since,),
+        ).fetchall()
+        login_lockouts = db.execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='failed_login_lockout' AND created_at >= ?",
+            (since,),
+        ).fetchone()[0]
+        refresh_limits = db.execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='excessive_refresh' AND created_at >= ?",
+            (since,),
+        ).fetchone()[0]
+        speed_anomalies = db.execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND created_at >= ?",
+            (since,),
+        ).fetchone()[0]
+        return render_template(
+            "reports.html",
+            risk_rows=risk_rows,
+            login_lockouts=login_lockouts,
+            refresh_limits=refresh_limits,
+            speed_anomalies=speed_anomalies,
+            generated_at=format_clock(now),
+        )
+
     @app.get("/kiosk")
     def kiosk():
         routes = get_db().execute("SELECT * FROM routes ORDER BY code").fetchall()
         return render_template("kiosk.html", routes=routes)
 
-    @app.get("/api/heartbeat")
-    def heartbeat():
-        user_id = session.get("user_id", 0)
-        screen = request.args.get("screen", "unknown")
-        now = utc_now()
-        bucket = now.strftime("%Y-%m-%dT%H:%M")
-        previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
-        db = get_db()
-        if user_id:
-            row = db.execute(
-                "SELECT attempt_count FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket=?",
-                (user_id, screen, bucket),
-            ).fetchone()
-            count = (row["attempt_count"] if row else 0) + 1
-            if row:
-                db.execute(
-                    "UPDATE refresh_attempts SET attempt_count=? WHERE user_id=? AND screen=? AND minute_bucket=?",
-                    (count, user_id, screen, bucket),
-                )
-            else:
-                db.execute(
-                    "INSERT INTO refresh_attempts (user_id,screen,minute_bucket,attempt_count) VALUES (?,?,?,?)",
-                    (user_id, screen, bucket, count),
-                )
-            db.commit()
+    register_ops_routes(
+        app,
+        {
+            "login_required": login_required,
+            "require_permission": require_permission,
+            "get_db": get_db,
+            "utc_now": utc_now,
+            "to_iso": to_iso,
+            "from_iso": from_iso,
+            "format_clock": format_clock,
+            "log_risk": log_risk,
+            "available_seats": available_seats,
+            "assert_nonce": assert_nonce,
+            "create_booking_hold_for_user": create_booking_hold_for_user,
+            "confirm_booking_for_user": confirm_booking_for_user,
+            "ensure_kiosk_user_id": ensure_kiosk_user_id,
+        },
+    )
 
-            rolling = db.execute(
-                "SELECT COALESCE(SUM(attempt_count),0) FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket IN (?,?)",
-                (user_id, screen, bucket, previous_bucket),
-            ).fetchone()[0]
-            if rolling > 30:
-                log_risk("excessive_refresh", f"screen={screen}, count_60s={rolling}", user_id)
-                return jsonify({"error": "Refresh rate exceeded", "retry_after_seconds": 10}), 429
-
-        return jsonify({"ok": True, "time": format_clock(utc_now())})
-
-    @app.get("/api/arrival-board")
-    def arrival_board():
-        db = get_db()
-        now = utc_now()
-        route_id = request.args.get("route_id", type=int)
-        rows = []
-        route_filter = "WHERE r.id=?" if route_id else ""
-        params = (route_id,) if route_id else ()
-        routes = db.execute(f"SELECT r.id, r.code FROM routes r {route_filter} ORDER BY r.code", params).fetchall()
-
-        for route in routes:
-            latest_ping = db.execute(
-                "SELECT * FROM vehicle_pings WHERE route_id=? ORDER BY ping_time DESC LIMIT 1",
-                (route["id"],),
-            ).fetchone()
-            live = latest_ping and (now - from_iso(latest_ping["ping_time"]) <= timedelta(minutes=2))
-            next_stop = db.execute(
-                "SELECT stop_name, scheduled_arrival, stop_sequence FROM schedules WHERE route_id=? ORDER BY stop_sequence LIMIT 1",
-                (route["id"],),
-            ).fetchone()
-            if not next_stop:
-                continue
-            if live:
-                eta = from_iso(next_stop["scheduled_arrival"]) + timedelta(minutes=2)
-                mode = "Live"
-            else:
-                eta = from_iso(next_stop["scheduled_arrival"])
-                mode = "Scheduled"
-            rows.append(
-                {
-                    "route_code": route["code"],
-                    "stop_name": next_stop["stop_name"],
-                    "eta_display": format_clock(eta),
-                    "mode": mode,
-                }
-            )
-
-        return render_template("partials/arrival_board.html", rows=rows, last_updated=format_clock(now))
-
-    @app.get("/api/route-distribution")
-    @login_required
-    def route_distribution():
-        db = get_db()
-        data = db.execute(
-            """
-            SELECT r.code, COUNT(DISTINCT vp.vehicle_id) AS active_vehicles
-            FROM routes r
-            LEFT JOIN vehicle_pings vp ON vp.route_id=r.id
-              AND vp.ping_time >= ?
-            GROUP BY r.id
-            ORDER BY r.code
-            """,
-            (to_iso(utc_now() - timedelta(minutes=2)),),
-        ).fetchall()
-        return render_template(
-            "partials/route_distribution.html",
-            rows=data,
-            last_updated=format_clock(utc_now()),
-        )
-
-    @app.get("/api/seat-availability/<int:departure_id>")
-    def seat_availability_partial(departure_id):
-        seats = available_seats(get_db(), departure_id)
-        return render_template(
-            "partials/seat_availability.html",
-            seats=seats,
-            last_updated=format_clock(utc_now()),
-        )
-
-    @app.post("/api/security/nonce")
-    @login_required
-    def create_nonce():
-        action = request.form.get("action", "")
-        if not action:
-            return jsonify({"error": "Action required"}), 400
-        nonce = secrets.token_urlsafe(24)
-        get_db().execute(
-            "INSERT INTO sessions_nonce (user_id,action,nonce,expires_at) VALUES (?,?,?,?)",
-            (session["user_id"], action, nonce, to_iso(utc_now() + timedelta(minutes=10))),
-        )
-        get_db().commit()
-        return jsonify({"nonce": nonce})
-
-    @app.post("/api/bookings/hold")
-    @login_required
-    @require_permission("booking:create")
-    def create_hold():
-        payload = request.get_json(force=True)
-        response, error, status = create_booking_hold_for_user(session["user_id"], payload)
-        if error:
-            return jsonify(error), status
-        return jsonify(response), status
-
-    @app.post("/api/bookings/confirm")
-    @login_required
-    @require_permission("booking:create")
-    def confirm_booking():
-        payload = request.get_json(force=True)
-        hold_nonce = payload.get("hold_nonce")
-        request_nonce = payload.get("request_nonce")
-        contact = payload.get("contact", "")
-        response, error, status = confirm_booking_for_user(session["user_id"], hold_nonce, request_nonce, contact)
-        if error:
-            return jsonify(error), status
-        return jsonify(response), status
-
-    @app.post("/api/kiosk/security/nonce")
-    def create_kiosk_nonce():
-        action = request.form.get("action", "")
-        if not action:
-            return jsonify({"error": "Action required"}), 400
-        db = get_db()
-        kiosk_user_id = ensure_kiosk_user_id(db)
-        nonce = secrets.token_urlsafe(24)
-        db.execute(
-            "INSERT INTO sessions_nonce (user_id,action,nonce,expires_at) VALUES (?,?,?,?)",
-            (kiosk_user_id, action, nonce, to_iso(utc_now() + timedelta(minutes=10))),
-        )
-        db.commit()
-        return jsonify({"nonce": nonce})
-
-    @app.post("/api/kiosk/bookings/hold")
-    def kiosk_create_hold():
-        payload = request.get_json(force=True)
-        kiosk_user_id = ensure_kiosk_user_id(get_db())
-        response, error, status = create_booking_hold_for_user(kiosk_user_id, payload)
-        if error:
-            return jsonify(error), status
-        return jsonify(response), status
-
-    @app.post("/api/kiosk/bookings/confirm")
-    def kiosk_confirm_booking():
-        payload = request.get_json(force=True)
-        hold_nonce = payload.get("hold_nonce")
-        request_nonce = payload.get("request_nonce")
-        contact = payload.get("contact", "")
-        kiosk_user_id = ensure_kiosk_user_id(get_db())
-        response, error, status = confirm_booking_for_user(kiosk_user_id, hold_nonce, request_nonce, contact)
-        if error:
-            return jsonify(error), status
-        return jsonify(response), status
-
-    @app.post("/api/vehicle-pings/upload")
-    @login_required
-    def upload_vehicle_pings():
-        file = request.files.get("file")
-        if not file:
-            return jsonify({"error": "CSV file required"}), 400
-        text = file.read().decode("utf-8")
-        reader = csv.DictReader(text.splitlines())
-        db = get_db()
-        inserted = 0
-        for row in reader:
-            vehicle_id = row.get("vehicle_id")
-            route_raw = row.get("route_id")
-            if not vehicle_id or route_raw is None:
-                continue
-            route_id = int(route_raw)
-            stop_sequence = int(row.get("stop_sequence", 1) or 1)
-            speed_mph = float(row.get("speed_mph", 0) or 0)
-            ping_time = row.get("ping_time") or to_iso(utc_now())
-            previous = db.execute(
-                "SELECT speed_mph,ping_time FROM vehicle_pings WHERE vehicle_id=? ORDER BY ping_time DESC LIMIT 1",
-                (vehicle_id,),
-            ).fetchone()
-            if previous:
-                delta_hours = max(
-                    1 / 3600,
-                    (from_iso(ping_time) - from_iso(previous["ping_time"])).total_seconds() / 3600,
-                )
-                if abs(speed_mph - previous["speed_mph"]) / delta_hours > 85:
-                    log_risk(
-                        "impossible_speed_jump",
-                        f"vehicle={vehicle_id}, from={previous['speed_mph']}, to={speed_mph}",
-                        session["user_id"],
-                    )
-            db.execute(
-                "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    vehicle_id,
-                    route_id,
-                    stop_sequence,
-                    float(row.get("lat", 0)),
-                    float(row.get("lon", 0)),
-                    speed_mph,
-                    ping_time,
-                    "csv",
-                ),
-            )
-            inserted += 1
-        db.commit()
-        return jsonify({"ok": True, "inserted": inserted})
-
-    @app.post("/api/depot/bins/<int:bin_id>/freeze")
-    @login_required
-    @require_permission("depot:manage")
-    def freeze_bin(bin_id):
-        frozen = int(request.form.get("frozen", "1"))
-        get_db().execute("UPDATE bins SET frozen=? WHERE id=?", (frozen, bin_id))
-        get_db().commit()
-        return jsonify({"ok": True, "frozen": bool(frozen)})
-
-    @app.post("/api/depot/allocate")
-    @login_required
-    @require_permission("depot:manage")
-    def allocate_inventory():
-        payload = request.get_json(force=True)
-        request_nonce = payload.get("request_nonce")
-        ok, msg = assert_nonce(session["user_id"], "inventory_adjust", request_nonce)
-        if not ok:
-            return jsonify({"error": msg}), 409
-        bin_id = int(payload["bin_id"])
-        vol = float(payload["volume_cuft"])
-        weight = float(payload["weight_lb"])
-
-        db = get_db()
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            row = db.execute("SELECT * FROM bins WHERE id=?", (bin_id,)).fetchone()
-            if not row:
-                db.rollback()
-                return jsonify({"error": "Bin not found"}), 404
-            if row["frozen"]:
-                db.rollback()
-                return jsonify({"error": "Bin is frozen"}), 409
-            if row["current_cuft"] + vol > row["capacity_cuft"] or row["current_lb"] + weight > row["capacity_lb"]:
-                db.rollback()
-                return jsonify({"error": "Bin capacity exceeded"}), 422
-
-            db.execute(
-                "INSERT INTO inventory_items (bin_id,item_name,volume_cuft,weight_lb,created_at) VALUES (?,?,?,?,?)",
-                (bin_id, payload.get("item_name", "Asset"), vol, weight, to_iso(utc_now())),
-            )
-            db.execute(
-                "UPDATE bins SET current_cuft=current_cuft+?, current_lb=current_lb+? WHERE id=?",
-                (vol, weight, bin_id),
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        return jsonify({"ok": True})
-
-    @app.get("/notes")
-    @login_required
-    @require_permission("notes:read")
-    def notes_index():
-        user = current_user()
-        if not user:
-            abort(401)
-        if is_note_manager(user):
-            notes = get_db().execute(
-                "SELECT n.id,n.title,n.note_type,n.updated_at,n.depot_scope,u.username owner FROM notes n JOIN users u ON u.id=n.owner_id ORDER BY n.updated_at DESC LIMIT 50"
-            ).fetchall()
-        else:
-            notes = get_db().execute(
-                "SELECT n.id,n.title,n.note_type,n.updated_at,n.depot_scope,u.username owner FROM notes n JOIN users u ON u.id=n.owner_id WHERE n.depot_scope=? ORDER BY n.updated_at DESC LIMIT 50",
-                (user["depot_assignment"],),
-            ).fetchall()
-        return render_template("notes.html", notes=notes)
-
-    @app.post("/api/notes")
-    @login_required
-    @require_permission("notes:write")
-    def save_note():
-        payload = request.get_json(force=True)
-        note_id = payload.get("id")
-        title = payload["title"].strip()
-        content_md = payload.get("content_md", "")
-        note_type = payload.get("note_type", "training")
-
-        db = get_db()
-        user = current_user()
-        if not user:
-            return jsonify({"error": "Unauthorized"}), 401
-        now = to_iso(utc_now())
-        if note_id:
-            note = db.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
-            if not note:
-                return jsonify({"error": "Note not found"}), 404
-            if not can_edit_note(user, note):
-                return jsonify({"error": "Forbidden"}), 403
-            version_no = db.execute(
-                "SELECT COALESCE(MAX(version_no),0)+1 FROM note_versions WHERE note_id=?", (note_id,)
-            ).fetchone()[0]
-            db.execute(
-                "INSERT INTO note_versions (note_id,version_no,title,content_md,created_by,created_at) VALUES (?,?,?,?,?,?)",
-                (note_id, version_no, note["title"], note["content_md"], session["user_id"], now),
-            )
-            db.execute(
-                "UPDATE notes SET title=?, content_md=?, updated_at=? WHERE id=?",
-                (title, content_md, now, note_id),
-            )
-            db.execute(
-                "DELETE FROM note_versions WHERE id IN (SELECT id FROM note_versions WHERE note_id=? ORDER BY version_no DESC LIMIT -1 OFFSET 20)",
-                (note_id,),
-            )
-            db.commit()
-            return jsonify({"ok": True, "id": note_id})
-
-        cursor = db.execute(
-            "INSERT INTO notes (title,content_md,note_type,owner_id,depot_scope,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-            (title, content_md, note_type, session["user_id"], user["depot_assignment"], now, now),
-        )
-        db.commit()
-        return jsonify({"ok": True, "id": cursor.lastrowid})
-
-    @app.post("/api/notes/<int:note_id>/attachments")
-    @login_required
-    @require_permission("notes:write")
-    def upload_attachment(note_id):
-        note = get_db().execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (note_id,)).fetchone()
-        if not note:
-            return jsonify({"error": "Note not found"}), 404
-        if not can_edit_note(current_user(), note):
-            return jsonify({"error": "Forbidden"}), 403
-        file = request.files.get("file")
-        if not file:
-            return jsonify({"error": "File required"}), 400
-        if request.content_length and request.content_length > 20 * 1024 * 1024:
-            return jsonify({"error": "File too large"}), 413
-        filename = secure_filename(file.filename or "attachment.bin")
-        stored = ATTACHMENTS_DIR / f"{note_id}_{secrets.token_hex(4)}_{filename}"
-        file.save(stored)
-        size = stored.stat().st_size
-        if size > 20 * 1024 * 1024:
-            stored.unlink(missing_ok=True)
-            return jsonify({"error": "File too large"}), 413
-        get_db().execute(
-            "INSERT INTO note_attachments (note_id,filename,stored_path,size_bytes,uploaded_by,uploaded_at) VALUES (?,?,?,?,?,?)",
-            (note_id, filename, str(stored), size, session["user_id"], to_iso(utc_now())),
-        )
-        get_db().commit()
-        return jsonify({"ok": True})
-
-    @app.post("/api/notes/link")
-    @login_required
-    @require_permission("notes:write")
-    def link_notes():
-        payload = request.get_json(force=True)
-        left = int(payload["from_note_id"])
-        right = int(payload["to_note_id"])
-        link_type = payload.get("link_type", "related")
-        db = get_db()
-        user = current_user()
-        left_note = db.execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (left,)).fetchone()
-        right_note = db.execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (right,)).fetchone()
-        if not left_note or not right_note:
-            return jsonify({"error": "Note not found"}), 404
-        if not can_edit_note(user, left_note) or not can_edit_note(user, right_note):
-            return jsonify({"error": "Forbidden"}), 403
-        db.execute(
-            "INSERT OR IGNORE INTO note_links (from_note_id,to_note_id,link_type) VALUES (?,?,?)",
-            (left, right, link_type),
-        )
-        db.execute(
-            "INSERT OR IGNORE INTO note_links (from_note_id,to_note_id,link_type) VALUES (?,?,?)",
-            (right, left, link_type),
-        )
-        db.commit()
-        return jsonify({"ok": True})
-
-    @app.post("/api/notes/<int:note_id>/rollback/<int:version_no>")
-    @login_required
-    @require_permission("notes:write")
-    def rollback_note(note_id, version_no):
-        db = get_db()
-        note = db.execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (note_id,)).fetchone()
-        if not note:
-            return jsonify({"error": "Note not found"}), 404
-        if not can_edit_note(current_user(), note):
-            return jsonify({"error": "Forbidden"}), 403
-        version = db.execute(
-            "SELECT title,content_md FROM note_versions WHERE note_id=? AND version_no=?",
-            (note_id, version_no),
-        ).fetchone()
-        if not version:
-            return jsonify({"error": "Version not found"}), 404
-        db.execute(
-            "UPDATE notes SET title=?, content_md=?, updated_at=? WHERE id=?",
-            (version["title"], version["content_md"], to_iso(utc_now()), note_id),
-        )
-        db.commit()
-        return jsonify({"ok": True})
-
-    @app.get("/api/notes/rollup")
-    @login_required
-    def notes_rollup():
-        db = get_db()
-        user = current_user()
-        if not user:
-            return jsonify([])
-        if is_note_manager(user):
-            data = db.execute(
-                """
-                SELECT n.note_type, COUNT(*) AS total,
-                    SUM(CASE WHEN nl.id IS NOT NULL THEN 1 ELSE 0 END) AS linked
-                FROM notes n
-                LEFT JOIN note_links nl ON nl.from_note_id=n.id
-                GROUP BY n.note_type
-                """
-            ).fetchall()
-        else:
-            data = db.execute(
-                """
-                SELECT n.note_type, COUNT(*) AS total,
-                    SUM(CASE WHEN nl.id IS NOT NULL THEN 1 ELSE 0 END) AS linked
-                FROM notes n
-                LEFT JOIN note_links nl ON nl.from_note_id=n.id
-                WHERE n.depot_scope=?
-                GROUP BY n.note_type
-                """,
-                (user["depot_assignment"],),
-            ).fetchall()
-        return jsonify([dict(row) for row in data])
-
-    @app.post("/api/social/action")
-    @login_required
-    @require_permission("social:use")
-    def social_action():
-        payload = request.get_json(force=True)
-        target_id = int(payload["target_user_id"])
-        relation = payload["relation"]
-        actor_id = session["user_id"]
-        if target_id == actor_id:
-            return jsonify({"error": "Cannot relate to self"}), 400
-
-        db = get_db()
-        if relation == "unfollow":
-            db.execute(
-                "DELETE FROM relationships WHERE user_a=? AND user_b=? AND relation='follow'",
-                (actor_id, target_id),
-            )
-        else:
-            db.execute(
-                "INSERT OR IGNORE INTO relationships (user_a,user_b,relation,created_at) VALUES (?,?,?,?)",
-                (actor_id, target_id, relation, to_iso(utc_now())),
-            )
-        db.commit()
-        return jsonify({"ok": True})
-
-    @app.get("/profiles/<int:user_id>")
-    @login_required
-    def profile(user_id):
-        viewer = session["user_id"]
-        db = get_db()
-        owner = db.execute(
-            "SELECT id,username,role,depot_assignment,face_identifier_encrypted FROM users WHERE id=?",
-            (user_id,),
-        ).fetchone()
-        if not owner:
-            abort(404)
-        blocked = db.execute(
-            "SELECT 1 FROM relationships WHERE user_a=? AND user_b=? AND relation='block'",
-            (owner["id"], viewer),
-        ).fetchone()
-        if blocked:
-            abort(403)
-
-        follow_a = db.execute(
-            "SELECT 1 FROM relationships WHERE user_a=? AND user_b=? AND relation='follow'",
-            (viewer, owner["id"]),
-        ).fetchone()
-        follow_b = db.execute(
-            "SELECT 1 FROM relationships WHERE user_a=? AND user_b=? AND relation='follow'",
-            (owner["id"], viewer),
-        ).fetchone()
-        mutual = bool(follow_a and follow_b)
-        masked_face = ""
-        if owner["face_identifier_encrypted"]:
-            raw = app.fernet.decrypt(owner["face_identifier_encrypted"]).decode("utf-8")
-            masked_face = mask_face_identifier(raw)
-        return render_template("profile.html", owner=owner, mutual=mutual, masked_face=masked_face)
-
-    def assign_variant(user_id, experiment_id):
-        hash_key = hashlib.sha256(f"{user_id}:{experiment_id}".encode("utf-8")).hexdigest()
-        return "A" if int(hash_key[-1], 16) % 2 == 0 else "B"
-
-    @app.get("/api/experiments/assign/<widget_key>")
-    @login_required
-    def experiment_assign(widget_key):
-        db = get_db()
-        exp = db.execute("SELECT * FROM experiments WHERE widget_key=?", (widget_key,)).fetchone()
-        if not exp or not exp["enabled"]:
-            return jsonify({"variant": "A", "label": "Version A", "enabled": False})
-        assignment = db.execute(
-            "SELECT variant FROM experiment_assignments WHERE experiment_id=? AND user_id=?",
-            (exp["id"], session["user_id"]),
-        ).fetchone()
-        if not assignment:
-            variant = assign_variant(session["user_id"], exp["id"])
-            db.execute(
-                "INSERT INTO experiment_assignments (experiment_id,user_id,variant,created_at) VALUES (?,?,?,?)",
-                (exp["id"], session["user_id"], variant, to_iso(utc_now())),
-            )
-            db.commit()
-        else:
-            variant = assignment["variant"]
-        label = exp["label_a"] if variant == "A" else exp["label_b"]
-        return jsonify({"variant": variant, "label": label, "enabled": True})
-
-    @app.get("/supervisor/experiments")
-    @login_required
-    @require_permission("experiments:manage")
-    def supervisor_experiments():
-        exps = get_db().execute("SELECT * FROM experiments ORDER BY widget_key").fetchall()
-        return render_template("experiments.html", experiments=exps)
-
-    @app.post("/supervisor/experiments/<int:exp_id>/toggle")
-    @login_required
-    @require_permission("experiments:manage")
-    def toggle_experiment(exp_id):
-        enabled = int(request.form.get("enabled", "1"))
-        get_db().execute("UPDATE experiments SET enabled=? WHERE id=?", (enabled, exp_id))
-        get_db().commit()
-        return redirect(url_for("supervisor_experiments"))
-
-    @app.get("/analyst/metrics")
-    @login_required
-    @require_permission("analytics:view")
-    def analyst_metrics():
-        db = get_db()
-        impressions = db.execute(
-            "SELECT COUNT(*) FROM analytics_events WHERE event_type='rec_impression'"
-        ).fetchone()[0]
-        clicks = db.execute("SELECT COUNT(*) FROM analytics_events WHERE event_type='rec_click'").fetchone()[0]
-        bookings = db.execute(
-            "SELECT COUNT(*) FROM analytics_events WHERE event_type='booking_confirmed'"
-        ).fetchone()[0]
-
-        seven_days_ago = to_iso(utc_now() - timedelta(days=7))
-        returns = db.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM analytics_events WHERE created_at >= ? GROUP BY user_id HAVING COUNT(*) > 1",
-            (seven_days_ago,),
-        ).fetchall()
-        return_usage = len(returns)
-
-        rank = db.execute(
-            """
-            SELECT
-              AVG(CASE WHEN recommended=1 AND relevant=1 THEN 1.0 ELSE 0 END) AS precision,
-              AVG(CASE WHEN relevant=1 AND recommended=1 THEN 1.0 ELSE 0 END) AS recall,
-              AVG(ndcg) AS ndcg,
-              AVG(covered) AS coverage,
-              AVG(diverse) AS diversity
-            FROM ranking_samples
-            """
-        ).fetchone()
-
-        ctr = (clicks / impressions) if impressions else 0
-        conversion = (bookings / clicks) if clicks else 0
-        return render_template(
-            "metrics.html",
-            ctr=round(ctr, 3),
-            conversion=round(conversion, 3),
-            return_usage=return_usage,
-            rank=rank,
-        )
-
-    @app.get("/api/departures/search")
-    def search_departures():
-        route_code = request.args.get("route_code")
-        db = get_db()
-        rows = db.execute(
-            """
-            SELECT d.id, r.code, r.origin, r.destination, d.departure_time, d.base_price
-            FROM departures d JOIN routes r ON r.id=d.route_id
-            WHERE (? IS NULL OR r.code = ?)
-            ORDER BY d.departure_time
-            LIMIT 25
-            """,
-            (route_code, route_code),
-        ).fetchall()
-        response = []
-        for row in rows:
-            response.append(
-                {
-                    "departure_id": row["id"],
-                    "route": row["code"],
-                    "origin": row["origin"],
-                    "destination": row["destination"],
-                    "departure_time": row["departure_time"],
-                    "seats_remaining": available_seats(db, row["id"]),
-                    "base_price": row["base_price"],
-                }
-            )
-        return jsonify(response)
+    register_collab_routes(
+        app,
+        {
+            "current_user": current_user,
+            "login_required": login_required,
+            "require_permission": require_permission,
+            "is_note_manager": is_note_manager,
+            "can_edit_note": can_edit_note,
+            "get_db": get_db,
+            "utc_now": utc_now,
+            "to_iso": to_iso,
+            "ATTACHMENTS_DIR": ATTACHMENTS_DIR,
+            "mask_face_identifier": mask_face_identifier,
+        },
+    )
 
     app.get_db = get_db
     app.init_db = init_db

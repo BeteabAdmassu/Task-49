@@ -7,6 +7,7 @@
 - **Data ingest:** Vehicle pings accepted only via local CSV upload endpoint (or LAN gateway integration endpoint using same table contract).
 - **Security envelope:** RBAC permissions, lockout policy, 30-minute inactivity timeout, nonce checks on high-risk actions, risk event log.
 - **Isolation model:** Learning records are depot-scoped for non-HR/non-admin staff.
+- **Governance visibility:** HR/Admin reports page aggregates 7-day risk-event categories.
 
 ## Tech Stack
 - Flask (web UI + REST-style endpoints)
@@ -31,7 +32,9 @@
 - ETA fallback to scheduled mode when no ping for over 2 minutes.
 - Risk events raised for impossible speed jumps (>85 mph delta behavior) and refresh spam (>30/min/user/screen).
 - Note rollback supports one-click restore from latest 20 historical versions.
+- HTMX is served from local static assets to preserve full offline behavior.
 
 ## Maintainability Notes
 - Database schema/seed/migration bootstrap is isolated in `fullstack/app/db_bootstrap.py`.
-- Request handlers remain in Flask app, but infrastructure bootstrap concerns are separated from endpoint logic.
+- Collaboration routes are isolated in `fullstack/app/routes_collab.py` to reduce domain coupling in the app entry file.
+- Booking/depot/service-visibility routes are isolated in `fullstack/app/routes_ops.py`.

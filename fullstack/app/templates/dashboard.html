@@ -45,6 +45,9 @@
       <li><a href="{{ url_for('supervisor_experiments') }}">Experiment Controls</a></li>
       <li><a href="{{ url_for('analyst_metrics') }}">Analytics Dashboard</a></li>
       {% endif %}
+      {% if user.role in ['hr', 'admin'] %}
+      <li><a href="{{ url_for('reports_index') }}">Governance Reports</a></li>
+      {% endif %}
       <li><a href="{{ url_for('profile', user_id=user.id) }}">My Profile</a></li>
     </ul>
   </article>

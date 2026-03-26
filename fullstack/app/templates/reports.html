@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Governance Reports (Last 7 Days)</h2>
+  <p class="hint">Generated at {{ generated_at }}</p>
+  <div class="grid">
+    <div class="panel">
+      <h3>Login Lockouts</h3>
+      <p class="metric"><strong>{{ login_lockouts }}</strong></p>
+    </div>
+    <div class="panel">
+      <h3>Refresh Limit Violations</h3>
+      <p class="metric"><strong>{{ refresh_limits }}</strong></p>
+    </div>
+    <div class="panel">
+      <h3>Speed Anomalies</h3>
+      <p class="metric"><strong>{{ speed_anomalies }}</strong></p>
+    </div>
+  </div>
+  <h3>Risk Event Breakdown</h3>
+  <table>
+    <thead><tr><th>Event Type</th><th>Total</th></tr></thead>
+    <tbody>
+      {% for row in risk_rows %}
+      <tr><td>{{ row.event_type }}</td><td>{{ row.total }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
