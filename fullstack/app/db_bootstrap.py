@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS refresh_attempts (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(user_id, screen, minute_bucket)
 );
+CREATE TABLE IF NOT EXISTS refresh_cadence (
+    actor_key TEXT NOT NULL,
+    screen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY(actor_key, screen)
+);
 CREATE TABLE IF NOT EXISTS routes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE NOT NULL,
@@ -235,6 +241,16 @@ CREATE TABLE IF NOT EXISTS ranking_samples (
 
 
 def _ensure_migrations(db):
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS refresh_cadence (
+            actor_key TEXT NOT NULL,
+            screen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            PRIMARY KEY(actor_key, screen)
+        )
+        """
+    )
     note_cols = {row[1] for row in db.execute("PRAGMA table_info(notes)").fetchall()}
     if "depot_scope" not in note_cols:
         db.execute("ALTER TABLE notes ADD COLUMN depot_scope TEXT")

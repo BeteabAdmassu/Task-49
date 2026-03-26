@@ -2,6 +2,8 @@ import json
 import os
 import secrets
 import sqlite3
+import html
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -40,6 +42,11 @@ try:
     import markdown
 except Exception:  # pragma: no cover
     markdown = None
+
+try:
+    import bleach
+except Exception:  # pragma: no cover
+    bleach = None
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -81,7 +88,12 @@ def create_app():
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=30)
     app.config["TLS_REQUIRED"] = True
     app.config["DISABLE_TLS_ENFORCEMENT"] = os.environ.get("DISABLE_TLS_ENFORCEMENT", "0") == "1"
+    app.config["GATEWAY_TOKEN"] = os.environ.get("METROOPS_GATEWAY_TOKEN")
+    app.config["CSRF_PROTECT"] = True
     app.fernet = load_fernet()
+
+    if not app.config["GATEWAY_TOKEN"]:
+        app.logger.warning("METROOPS_GATEWAY_TOKEN is not set; LAN gateway ingestion endpoint is disabled")
 
     def get_db():
         if "db" not in g:
@@ -115,6 +127,7 @@ def create_app():
         @wraps(fn)
         def wrapper(*args, **kwargs):
             if not session.get("user_id"):
+                app.logger.info("auth_required_redirect endpoint=%s", request.endpoint)
                 return redirect(url_for("login"))
             return fn(*args, **kwargs)
 
@@ -129,6 +142,13 @@ def create_app():
                     abort(401)
                 perms = user_permissions(user["role"])
                 if permission not in perms and "admin:all" not in perms:
+                    app.logger.warning(
+                        "authz_denied user_id=%s role=%s permission=%s endpoint=%s",
+                        user["id"],
+                        user["role"],
+                        permission,
+                        request.endpoint,
+                    )
                     abort(403)
                 return fn(*args, **kwargs)
 
@@ -145,6 +165,17 @@ def create_app():
         if len(password or "") < MIN_PASSWORD_LENGTH:
             return f"Password must be at least {MIN_PASSWORD_LENGTH} characters"
         return None
+
+    def ensure_csrf_token():
+        token = session.get("csrf_token")
+        if not token:
+            token = secrets.token_urlsafe(32)
+            session["csrf_token"] = token
+        return token
+
+    @app.context_processor
+    def inject_csrf_token():
+        return {"csrf_token": ensure_csrf_token()}
 
     def is_note_manager(user):
         return user and user["role"] in {"hr", "admin"}
@@ -183,9 +214,38 @@ def create_app():
         get_db().commit()
 
     def html_from_md(text):
+        source = text or ""
         if markdown is None:
-            return text.replace("\n", "<br>")
-        return markdown.markdown(text)
+            return html.escape(source).replace("javascript:", "").replace("\n", "<br>")
+        rendered = markdown.markdown(source, extensions=["extra", "sane_lists"])
+        if bleach is None:
+            return html.escape(source).replace("javascript:", "").replace("\n", "<br>")
+        safe_html = bleach.clean(
+            rendered,
+            tags=[
+                "p",
+                "br",
+                "strong",
+                "em",
+                "ul",
+                "ol",
+                "li",
+                "code",
+                "pre",
+                "blockquote",
+                "a",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+            ],
+            attributes={"a": ["href", "title", "rel"]},
+            protocols=["http", "https", "mailto"],
+            strip=True,
+        )
+        return safe_html.replace("javascript:", "")
 
     def cleanup_expired_holds(db):
         now_iso = to_iso(utc_now())
@@ -220,19 +280,23 @@ def create_app():
         return True, "ok"
 
     def price_for_departure(db, departure, seats):
-        base = departure["base_price"]
+        base = Decimal(str(departure["base_price"]))
         dep_date = from_iso(departure["departure_time"]).date().isoformat()
         plan = db.execute(
             "SELECT amount_delta FROM rate_plans WHERE start_date <= ? AND end_date >= ? ORDER BY id DESC LIMIT 1",
             (dep_date, dep_date),
         ).fetchone()
-        delta = plan["amount_delta"] if plan else 0
-        return round((base + delta) * seats, 2)
+        delta = Decimal(str(plan["amount_delta"] if plan else 0))
+        total = (base + delta) * Decimal(seats)
+        return float(total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
     def create_booking_hold_for_user(user_id, payload):
-        departure_id = int(payload.get("departure_id"))
-        seats_requested = int(payload.get("seats", 1))
-        bundle_days = int(payload.get("bundle_days", 1))
+        try:
+            departure_id = int(payload.get("departure_id"))
+            seats_requested = int(payload.get("seats", 1))
+            bundle_days = int(payload.get("bundle_days", 1))
+        except (TypeError, ValueError):
+            return None, {"error": "Invalid departure_id/seats/bundle_days"}, 422
         product_type = payload.get("product_type", "single")
 
         db = get_db()
@@ -255,6 +319,13 @@ def create_app():
             seats = available_seats(db, departure_id)
             if seats_requested <= 0 or seats_requested > seats:
                 db.rollback()
+                app.logger.info(
+                    "booking_hold_conflict user_id=%s departure_id=%s requested=%s available=%s",
+                    user_id,
+                    departure_id,
+                    seats_requested,
+                    seats,
+                )
                 return None, {"error": "Insufficient seats", "seats_remaining": seats}, 409
 
             hold_nonce = secrets.token_urlsafe(16)
@@ -365,6 +436,18 @@ def create_app():
             if not secure:
                 return jsonify({"error": "TLS is required"}), 426
 
+        if (
+            app.config.get("CSRF_PROTECT", True)
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and session.get("user_id")
+            and request.endpoint not in {"login", "static", "gateway_vehicle_pings"}
+        ):
+            header_token = request.headers.get("X-CSRF-Token", "")
+            form_token = request.form.get("csrf_token", "")
+            token = header_token or form_token
+            if token != session.get("csrf_token"):
+                return jsonify({"error": "Invalid CSRF token"}), 403
+
         if session.get("user_id"):
             now = utc_now()
             last_seen = session.get("last_seen")
@@ -375,7 +458,59 @@ def create_app():
                     return redirect(url_for("login"))
             session["last_seen"] = to_iso(now)
 
-        if request.endpoint in {"heartbeat", "arrival_board", "route_distribution", "search_departures"}:
+        refresh_endpoints = {"heartbeat", "arrival_board", "route_distribution", "seat_availability_partial", "search_departures"}
+        if request.endpoint in refresh_endpoints:
+            now = utc_now()
+            db = get_db()
+            screen = request.args.get("screen") or request.path
+            actor_key = (
+                f"user:{session['user_id']}"
+                if session.get("user_id")
+                else f"anon:{session.setdefault('anon_refresh_id', secrets.token_hex(12))}"
+            )
+
+            cadence = db.execute(
+                "SELECT last_seen FROM refresh_cadence WHERE actor_key=? AND screen=?",
+                (actor_key, screen),
+            ).fetchone()
+            if cadence and (now - from_iso(cadence["last_seen"])) < timedelta(seconds=10):
+                retry_after = max(1, 10 - int((now - from_iso(cadence["last_seen"])).total_seconds()))
+                return jsonify({"error": "Refresh allowed once every 10 seconds", "retry_after_seconds": retry_after}), 429
+
+            db.execute(
+                "INSERT INTO refresh_cadence (actor_key,screen,last_seen) VALUES (?,?,?) ON CONFLICT(actor_key,screen) DO UPDATE SET last_seen=excluded.last_seen",
+                (actor_key, screen, to_iso(now)),
+            )
+
+            if session.get("user_id"):
+                user_id = session["user_id"]
+                bucket = now.strftime("%Y-%m-%dT%H:%M")
+                previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
+                row = db.execute(
+                    "SELECT attempt_count FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket=?",
+                    (user_id, screen, bucket),
+                ).fetchone()
+                count = (row["attempt_count"] if row else 0) + 1
+                if row:
+                    db.execute(
+                        "UPDATE refresh_attempts SET attempt_count=? WHERE user_id=? AND screen=? AND minute_bucket=?",
+                        (count, user_id, screen, bucket),
+                    )
+                else:
+                    db.execute(
+                        "INSERT INTO refresh_attempts (user_id,screen,minute_bucket,attempt_count) VALUES (?,?,?,?)",
+                        (user_id, screen, bucket, count),
+                    )
+
+                rolling = db.execute(
+                    "SELECT COALESCE(SUM(attempt_count),0) FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket IN (?,?)",
+                    (user_id, screen, bucket, previous_bucket),
+                ).fetchone()[0]
+                if rolling > 30:
+                    log_risk("excessive_refresh", f"screen={screen}, count_60s={rolling}", user_id)
+                    db.commit()
+                    return jsonify({"error": "Refresh rate exceeded", "retry_after_seconds": 10}), 429
+
             db = get_db()
             cleanup_expired_holds(db)
             db.commit()
@@ -423,6 +558,7 @@ def create_app():
         session.clear()
         session["user_id"] = user["id"]
         session["last_seen"] = to_iso(utc_now())
+        session["csrf_token"] = secrets.token_urlsafe(32)
         session.permanent = True
         return redirect(url_for("dashboard"))
 
@@ -544,6 +680,7 @@ def create_app():
             "to_iso": to_iso,
             "ATTACHMENTS_DIR": ATTACHMENTS_DIR,
             "mask_face_identifier": mask_face_identifier,
+            "html_from_md": html_from_md,
         },
     )
 

@@ -42,9 +42,20 @@
   <h3>Rollback</h3>
   <div class="stack inline">
     <label>Note ID <input id="rollback-note-id" type="number" min="1"></label>
-    <label>Version No <input id="rollback-version" type="number" min="1"></label>
-    <button onclick="rollbackNote()">Rollback</button>
+    <button onclick="loadRollbackVersions()">Load Last 20 Versions</button>
   </div>
+  <div id="rollback-versions" class="stack"></div>
+  <div class="stack inline">
+    <label>Version No (manual optional) <input id="rollback-version" type="number" min="1"></label>
+    <button onclick="rollbackNote()">Rollback by Version</button>
+  </div>
+
+  <h3>Markdown Preview</h3>
+  <div class="stack inline">
+    <label>Note ID <input id="preview-note-id" type="number" min="1"></label>
+    <button onclick="loadMarkdownPreview()">Load Preview</button>
+  </div>
+  <div id="markdown-preview" class="result-card">Rendered markdown will appear here.</div>
   <p id="notes-status" class="hint"></p>
 </section>
 
@@ -105,6 +116,57 @@
     const res = await fetch(`/api/notes/${noteId}/rollback/${versionNo}`, { method: "POST" });
     const data = await res.json();
     setStatus(res.ok ? "Rollback completed" : (data.error || "Rollback failed"));
+  }
+
+  async function rollbackByClick(versionNo) {
+    const noteId = Number(document.getElementById("rollback-note-id").value);
+    const res = await fetch(`/api/notes/${noteId}/rollback/${versionNo}`, { method: "POST" });
+    const data = await res.json();
+    setStatus(res.ok ? `Rolled back to version ${versionNo}` : (data.error || "Rollback failed"));
+  }
+
+  async function loadRollbackVersions() {
+    const noteId = Number(document.getElementById("rollback-note-id").value);
+    if (!noteId) {
+      setStatus("Enter a Note ID to load version history.");
+      return;
+    }
+    const container = document.getElementById("rollback-versions");
+    const res = await fetch(`/api/notes/${noteId}/versions`);
+    const data = await res.json();
+    if (!res.ok) {
+      container.innerHTML = "";
+      setStatus(data.error || "Could not load versions.");
+      return;
+    }
+    if (!data.length) {
+      container.innerHTML = "<p class='hint'>No versions available yet.</p>";
+      return;
+    }
+    container.innerHTML = data.map((v) => `
+      <div class="result-card">
+        <strong>Version ${v.version_no}</strong> - ${v.title}<br>
+        Saved by ${v.created_by} at ${v.created_at}<br>
+        <button onclick="rollbackByClick(${v.version_no})">Rollback to v${v.version_no}</button>
+      </div>
+    `).join("");
+  }
+
+  async function loadMarkdownPreview() {
+    const noteId = Number(document.getElementById("preview-note-id").value);
+    if (!noteId) {
+      setStatus("Enter a Note ID to load preview.");
+      return;
+    }
+    const preview = document.getElementById("markdown-preview");
+    const res = await fetch(`/api/notes/${noteId}/render`);
+    const data = await res.json();
+    if (!res.ok) {
+      preview.textContent = "";
+      setStatus(data.error || "Could not load markdown preview.");
+      return;
+    }
+    preview.innerHTML = `<h4>${data.title}</h4>${data.html}`;
   }
 </script>
 {% endblock %}

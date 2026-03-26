@@ -14,9 +14,12 @@
 | POST | `/api/kiosk/bookings/hold` | Kiosk seat hold for 8 minutes | `departure_id,seats,product_type,bundle_days` | Hold metadata |
 | POST | `/api/kiosk/bookings/confirm` | Kiosk booking confirm with nonce | `hold_nonce,request_nonce,contact` | `{ ok,total_price }` |
 | POST | `/api/vehicle-pings/upload` | CSV ingestion for local vehicle pings | multipart file | `{ ok,inserted }` |
+| POST | `/api/vehicle-pings/gateway` | LAN gateway vehicle ping ingestion | JSON `pings[]` + `X-Gateway-Token` | `{ ok,inserted,source }` |
 | POST | `/api/depot/bins/<bin_id>/freeze` | Freeze/unfreeze bin | `frozen` | `{ ok,frozen }` |
 | POST | `/api/depot/allocate` | Capacity-checked inventory allocation | `bin_id,volume_cuft,weight_lb,request_nonce` | `{ ok }` |
 | POST | `/api/notes` | Create/update markdown record with versioning | note payload | `{ ok,id }` |
+| GET | `/api/notes/<note_id>/versions` | Fetch latest 20 rollback versions | path param | JSON list |
+| GET | `/api/notes/<note_id>/render` | Render note Markdown to HTML | path param | `{ note_id,title,html }` |
 | POST | `/api/notes/<note_id>/attachments` | Upload note attachment (<=20MB) | multipart file | `{ ok }` |
 | POST | `/api/notes/link` | Create bidirectional note links | `from_note_id,to_note_id,link_type` | `{ ok }` |
 | POST | `/api/notes/<note_id>/rollback/<version_no>` | Rollback to historical version | path params | `{ ok }` |
@@ -28,3 +31,6 @@
 
 Notes:
 - `GET /api/heartbeat` now returns HTTP `429` after more than 30 refresh attempts/minute/user/screen.
+- `GET /api/heartbeat` also enforces a strict minimum interval of 10 seconds per actor/screen.
+- Session-authenticated mutating routes require CSRF token via `X-CSRF-Token` header or form field.
+- LAN gateway ingestion is disabled unless `METROOPS_GATEWAY_TOKEN` is configured.

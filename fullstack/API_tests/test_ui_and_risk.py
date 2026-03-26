@@ -53,6 +53,15 @@ def login_admin(client):
     assert response.status_code == 302
 
 
+def authed_post(client, url, **kwargs):
+    with client.session_transaction() as sess:
+        token = sess.get("csrf_token")
+    headers = dict(kwargs.pop("headers", {}) or {})
+    if token:
+        headers["X-CSRF-Token"] = token
+    return client.post(url, headers=headers, **kwargs)
+
+
 def test_arrival_board_scheduled_fallback(tmp_path):
     client, _app = build_client(tmp_path)
     page = client.get("/api/arrival-board")
@@ -77,6 +86,30 @@ def test_arrival_board_live_mode_with_recent_ping(tmp_path):
     assert b"Live" in page.data
 
 
+def test_arrival_board_threshold_edges(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+    now = datetime.now(UTC)
+    with app.app_context():
+        app.get_db().execute(
+            "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
+            ("EDGE-IN", 1, 1, 0.0, 0.0, 20.0, (now - timedelta(minutes=2) + timedelta(seconds=1)).isoformat(), "csv"),
+        )
+        app.get_db().execute(
+            "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
+            ("EDGE-OUT", 2, 1, 0.0, 0.0, 20.0, (now - timedelta(minutes=2) - timedelta(seconds=1)).isoformat(), "csv"),
+        )
+        app.get_db().commit()
+
+    route1 = client.get("/api/arrival-board?route_id=1")
+    assert route1.status_code == 200
+    assert b"Live" in route1.data
+
+    route2 = client.get("/api/arrival-board?route_id=2")
+    assert route2.status_code == 200
+    assert b"Scheduled" in route2.data
+
+
 def test_excessive_refresh_generates_risk_event(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
@@ -84,6 +117,12 @@ def test_excessive_refresh_generates_risk_event(tmp_path):
     for _ in range(30):
         response = client.get("/api/heartbeat?screen=dashboard")
         assert response.status_code == 200
+        with app.app_context():
+            app.get_db().execute(
+                "UPDATE refresh_cadence SET last_seen=? WHERE actor_key=? AND screen=?",
+                ((datetime.now(UTC) - timedelta(seconds=11)).isoformat(), "user:1", "dashboard"),
+            )
+            app.get_db().commit()
 
     throttled = client.get("/api/heartbeat?screen=dashboard")
     assert throttled.status_code == 429
@@ -98,19 +137,29 @@ def test_excessive_refresh_generates_risk_event(tmp_path):
     assert other_screen.status_code == 200
 
 
+def test_strict_ten_second_refresh_cap(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+    first = client.get("/api/heartbeat?screen=dashboard")
+    assert first.status_code == 200
+    second = client.get("/api/heartbeat?screen=dashboard")
+    assert second.status_code == 429
+
+
 def test_depot_mutation_requires_permission(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
 
-    denied = client.post("/api/depot/bins/1/freeze", data={"frozen": "1"})
+    denied = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
     assert denied.status_code == 403
 
     login_supervisor(client)
-    allowed = client.post("/api/depot/bins/1/freeze", data={"frozen": "1"})
+    allowed = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
     assert allowed.status_code == 200
 
-    nonce = client.post("/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    allocate = client.post(
+    nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    allocate = authed_post(
+        client,
         "/api/depot/allocate",
         json={
             "request_nonce": nonce,
@@ -122,10 +171,11 @@ def test_depot_mutation_requires_permission(tmp_path):
     )
     assert allocate.status_code == 409
 
-    freeze_back = client.post("/api/depot/bins/1/freeze", data={"frozen": "0"})
+    freeze_back = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0"})
     assert freeze_back.status_code == 200
-    nonce2 = client.post("/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    frozen_then_allocate = client.post(
+    nonce2 = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    frozen_then_allocate = authed_post(
+        client,
         "/api/depot/allocate",
         json={
             "request_nonce": nonce2,
@@ -141,14 +191,16 @@ def test_depot_mutation_requires_permission(tmp_path):
 def test_note_object_level_authorization(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
-    create = client.post(
+    create = authed_post(
+        client,
         "/api/notes",
         json={"title": "Agent Note", "content_md": "A", "note_type": "training"},
     )
     note_id = create.get_json()["id"]
 
     login_supervisor(client)
-    denied = client.post(
+    denied = authed_post(
+        client,
         "/api/notes",
         json={"id": note_id, "title": "Hijack", "content_md": "B", "note_type": "training"},
     )
@@ -159,7 +211,8 @@ def test_note_object_level_authorization(tmp_path):
         assert title == "Agent Note"
 
     login_hr(client)
-    allowed = client.post(
+    allowed = authed_post(
+        client,
         "/api/notes",
         json={"id": note_id, "title": "HR Override", "content_md": "C", "note_type": "training"},
     )
@@ -203,7 +256,8 @@ def test_notes_depot_scope_isolation(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
 
-    create_local = client.post(
+    create_local = authed_post(
+        client,
         "/api/notes",
         json={"title": "Main Depot SOP", "content_md": "Local", "note_type": "training"},
     )
@@ -237,23 +291,36 @@ def test_reports_page_access_and_content(tmp_path):
     assert b"Risk Event Breakdown" in allowed.data
 
 
+def test_session_inactivity_timeout_redirects(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+    with client.session_transaction() as sess:
+        sess["last_seen"] = (datetime.now(UTC) - timedelta(minutes=31)).isoformat()
+    response = client.get("/dashboard", follow_redirects=False)
+    assert response.status_code == 302
+    assert "/login" in response.headers.get("Location", "")
+
+
 def test_admin_user_create_enforces_password_policy(tmp_path):
     client, _app = build_client(tmp_path)
     login_admin(client)
 
-    weak = client.post(
+    weak = authed_post(
+        client,
         "/admin/users",
         json={"username": "weakuser", "password": "short", "role": "employee", "depot_assignment": "Depot A"},
     )
     assert weak.status_code == 422
 
-    strong = client.post(
+    strong = authed_post(
+        client,
         "/admin/users",
         json={"username": "newagent", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "Depot A"},
     )
     assert strong.status_code == 201
 
-    duplicate = client.post(
+    duplicate = authed_post(
+        client,
         "/admin/users",
         json={"username": "newagent", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "Depot A"},
     )
@@ -323,7 +390,8 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
     login_agent(client)
 
     csv_data = "vehicle_id,route_id,stop_sequence,speed_mph,ping_time,lat,lon\nV1,1,1,10,2026-01-01T00:00:00+00:00,0,0\nV1,1,1,100,2026-01-01T00:01:00+00:00,0,0\n"
-    upload = client.post(
+    upload = authed_post(
+        client,
         "/api/vehicle-pings/upload",
         data={"file": (BytesIO(csv_data.encode("utf-8")), "pings.csv")},
         content_type="multipart/form-data",
@@ -335,32 +403,56 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
         ).fetchone()[0]
         assert risk_count >= 1
 
-    note_a = client.post("/api/notes", json={"title": "N1", "content_md": "one", "note_type": "training"}).get_json()["id"]
-    note_b = client.post("/api/notes", json={"title": "N2", "content_md": "two", "note_type": "incident"}).get_json()["id"]
-    link = client.post("/api/notes/link", json={"from_note_id": note_a, "to_note_id": note_b, "link_type": "related"})
+    note_a = authed_post(
+        client,
+        "/api/notes",
+        json={
+            "title": "N1",
+            "content_md": "one\n<script>alert(1)</script>\n[bad](javascript:alert(2))",
+            "note_type": "training",
+        },
+    ).get_json()["id"]
+    note_b = authed_post(client, "/api/notes", json={"title": "N2", "content_md": "two", "note_type": "incident"}).get_json()["id"]
+
+    preview = client.get(f"/api/notes/{note_a}/render")
+    assert preview.status_code == 200
+    html = preview.get_json()["html"]
+    assert "<p>" in html or "<br>" in html
+    assert "<script" not in html
+    assert "javascript:" not in html
+
+    link = authed_post(client, "/api/notes/link", json={"from_note_id": note_a, "to_note_id": note_b, "link_type": "related"})
     assert link.status_code == 200
 
-    upd = client.post("/api/notes", json={"id": note_a, "title": "N1-v2", "content_md": "two", "note_type": "training"})
+    upd = authed_post(client, "/api/notes", json={"id": note_a, "title": "N1-v2", "content_md": "two", "note_type": "training"})
     assert upd.status_code == 200
-    rollback = client.post(f"/api/notes/{note_a}/rollback/1")
+
+    versions = client.get(f"/api/notes/{note_a}/versions")
+    assert versions.status_code == 200
+    versions_payload = versions.get_json()
+    assert len(versions_payload) >= 1
+    target_version = versions_payload[0]["version_no"]
+
+    rollback = authed_post(client, f"/api/notes/{note_a}/rollback/{target_version}")
     assert rollback.status_code == 200
 
-    attach = client.post(
+    attach = authed_post(
+        client,
         f"/api/notes/{note_a}/attachments",
         data={"file": (BytesIO(b"hello"), "doc.txt")},
         content_type="multipart/form-data",
     )
     assert attach.status_code == 200
 
-    follow = client.post("/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    follow = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
     assert follow.status_code == 200
-    block = client.post("/api/social/action", json={"target_user_id": 2, "relation": "block"})
+    block = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "block"})
     assert block.status_code == 200
-    favorite = client.post("/api/social/action", json={"target_user_id": 2, "relation": "favorite"})
+    favorite = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "favorite"})
     assert favorite.status_code == 200
-    like = client.post("/api/social/action", json={"target_user_id": 2, "relation": "like"})
+    like = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "like"})
     assert like.status_code == 200
-    report = client.post("/api/social/action", json={"target_user_id": 2, "relation": "report"})
+    report = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "report"})
     assert report.status_code == 200
 
     with app.app_context():
@@ -385,3 +477,109 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
     profile = client.get("/profiles/1")
     assert profile.status_code == 200
     assert b"***" in profile.data
+
+
+def test_geospatial_implied_speed_anomaly_detection(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    csv_data = (
+        "vehicle_id,route_id,stop_sequence,speed_mph,ping_time,lat,lon\n"
+        "V2,1,1,20,2026-01-01T00:00:00+00:00,40.0,-74.0\n"
+        "V2,1,1,20,2026-01-01T00:01:00+00:00,41.0,-74.0\n"
+    )
+    upload = authed_post(
+        client,
+        "/api/vehicle-pings/upload",
+        data={"file": (BytesIO(csv_data.encode("utf-8")), "pings_geo.csv")},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+    with app.app_context():
+        rows = app.get_db().execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE '%implied_mph=%'"
+        ).fetchone()[0]
+        assert rows >= 1
+
+
+def test_lan_gateway_ingestion_and_csrf_protection(tmp_path):
+    os.environ["METROOPS_GATEWAY_TOKEN"] = "gateway-secret"
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    missing_csrf = client.post("/api/notes", json={"title": "Should fail", "content_md": "x", "note_type": "training"})
+    assert missing_csrf.status_code == 403
+
+    bad_gateway = client.post("/api/vehicle-pings/gateway", json={"pings": []})
+    assert bad_gateway.status_code == 403
+
+    good_gateway = client.post(
+        "/api/vehicle-pings/gateway",
+        json={
+            "pings": [
+                {
+                    "vehicle_id": "GW-1",
+                    "route_id": 1,
+                    "stop_sequence": 1,
+                    "speed_mph": 22,
+                    "ping_time": datetime.now(UTC).isoformat(),
+                    "lat": 0,
+                    "lon": 0,
+                }
+            ]
+        },
+        headers={"X-Gateway-Token": "gateway-secret"},
+    )
+    assert good_gateway.status_code == 200
+    with app.app_context():
+        row = app.get_db().execute(
+            "SELECT source FROM vehicle_pings WHERE vehicle_id='GW-1' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert row["source"] == "lan_gateway"
+
+
+def test_malformed_payloads_return_4xx_not_500(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_supervisor(client)
+
+    bad_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
+    assert bad_relation.status_code == 422
+
+    nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    bad_allocate = authed_post(
+        client,
+        "/api/depot/allocate",
+        json={"request_nonce": nonce, "bin_id": "bad", "volume_cuft": "x", "weight_lb": "y"},
+    )
+    assert bad_allocate.status_code == 422
+
+
+def test_attachment_size_limit_and_unauthorized_matrix(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    note_id = authed_post(
+        client,
+        "/api/notes",
+        json={"title": "Big Attach", "content_md": "x", "note_type": "training"},
+    ).get_json()["id"]
+
+    oversized = authed_post(
+        client,
+        f"/api/notes/{note_id}/attachments",
+        data={"file": (BytesIO(b"a" * (20 * 1024 * 1024 + 1)), "big.bin")},
+        content_type="multipart/form-data",
+    )
+    assert oversized.status_code == 413
+
+    exp_denied = client.get("/supervisor/experiments")
+    assert exp_denied.status_code == 403
+    metrics_denied = client.get("/analyst/metrics")
+    assert metrics_denied.status_code == 403
+    admin_denied = authed_post(
+        client,
+        "/admin/users",
+        json={"username": "x", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "A"},
+    )
+    assert admin_denied.status_code == 403

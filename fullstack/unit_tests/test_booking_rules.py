@@ -26,6 +26,15 @@ def login_agent(client):
     assert response.status_code == 302
 
 
+def auth_post(client, url, **kwargs):
+    with client.session_transaction() as sess:
+        token = sess.get("csrf_token")
+    headers = dict(kwargs.pop("headers", {}) or {})
+    if token:
+        headers["X-CSRF-Token"] = token
+    return client.post(url, headers=headers, **kwargs)
+
+
 def test_booking_window_and_inventory_lock(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
@@ -39,10 +48,10 @@ def test_booking_window_and_inventory_lock(tmp_path):
         )
         db.commit()
 
-    first_hold = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    first_hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
     assert first_hold.status_code == 200
 
-    second_hold = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    second_hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
     assert second_hold.status_code == 409
     assert second_hold.get_json()["error"] == "Insufficient seats"
 
@@ -54,7 +63,7 @@ def test_booking_window_and_inventory_lock(tmp_path):
         )
         db.commit()
 
-    out_of_window = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    out_of_window = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
     assert out_of_window.status_code == 422
     assert "more than 30 days" in out_of_window.get_json()["error"]
 
@@ -66,7 +75,7 @@ def test_booking_window_and_inventory_lock(tmp_path):
         )
         db.commit()
 
-    too_soon = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    too_soon = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
     assert too_soon.status_code == 422
     assert "at least 2 hours" in too_soon.get_json()["error"]
 
@@ -84,27 +93,31 @@ def test_booking_confirm_nonce_and_bundle_rule(tmp_path):
         )
         db.commit()
 
-    invalid_bundle = client.post(
+    invalid_bundle = auth_post(
+        client,
         "/api/bookings/hold",
         json={"departure_id": dep_id, "seats": 1, "product_type": "commuter_bundle", "bundle_days": 2},
     )
     assert invalid_bundle.status_code == 422
 
-    hold = client.post(
+    hold = auth_post(
+        client,
         "/api/bookings/hold",
         json={"departure_id": dep_id, "seats": 1, "product_type": "commuter_bundle", "bundle_days": 3},
     )
     hold_json = hold.get_json()
-    nonce_res = client.post("/api/security/nonce", data={"action": "booking_confirm"})
+    nonce_res = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"})
     nonce = nonce_res.get_json()["nonce"]
-    confirm = client.post(
+    confirm = auth_post(
+        client,
         "/api/bookings/confirm",
         json={"hold_nonce": hold_json["hold_nonce"], "request_nonce": nonce, "contact": "rider@example.com"},
     )
     assert confirm.status_code == 200
     assert confirm.get_json()["ok"] is True
 
-    replay = client.post(
+    replay = auth_post(
+        client,
         "/api/bookings/confirm",
         json={"hold_nonce": hold_json["hold_nonce"], "request_nonce": nonce, "contact": "rider@example.com"},
     )
@@ -130,18 +143,19 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
         )
         db.commit()
 
-    hold = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 2})
+    hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 2})
     assert hold.status_code == 200
     hold_nonce = hold.get_json()["hold_nonce"]
 
-    nonce = client.post("/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    nonce = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
     with app.app_context():
         app.get_db().execute(
             "UPDATE sessions_nonce SET expires_at=? WHERE nonce=?",
             ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), nonce),
         )
         app.get_db().commit()
-    expired_nonce = client.post(
+    expired_nonce = auth_post(
+        client,
         "/api/bookings/confirm",
         json={"hold_nonce": hold_nonce, "request_nonce": nonce, "contact": "rider@example.com"},
     )
@@ -154,16 +168,18 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
         )
         app.get_db().commit()
 
-    nonce2 = client.post("/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
-    expired_hold = client.post(
+    nonce2 = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    expired_hold = auth_post(
+        client,
         "/api/bookings/confirm",
         json={"hold_nonce": hold_nonce, "request_nonce": nonce2, "contact": "rider@example.com"},
     )
     assert expired_hold.status_code == 410
 
-    fresh_hold = client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
-    fresh_nonce = client.post("/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
-    confirmed = client.post(
+    fresh_hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    fresh_nonce = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    confirmed = auth_post(
+        client,
         "/api/bookings/confirm",
         json={"hold_nonce": fresh_hold.get_json()["hold_nonce"], "request_nonce": fresh_nonce, "contact": "rider@example.com"},
     )
@@ -187,7 +203,7 @@ def test_concurrent_holds_prevent_overbooking(tmp_path):
         db.commit()
 
     def hold(client):
-        return client.post("/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}).status_code
+        return auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}).status_code
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(hold, [client_a, client_b]))

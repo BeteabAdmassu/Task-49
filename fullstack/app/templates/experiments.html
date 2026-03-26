@@ -13,6 +13,7 @@
         <td>{{ exp.label_b }}</td>
         <td>
           <form method="post" action="{{ url_for('toggle_experiment', exp_id=exp.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="enabled" value="{{ 0 if exp.enabled else 1 }}">
             <button>{{ 'Disable' if exp.enabled else 'Enable' }}</button>
           </form>

@@ -31,6 +31,8 @@
 - Hard inventory cap enforced via `BEGIN IMMEDIATE` transaction + seat availability check (never below zero).
 - ETA fallback to scheduled mode when no ping for over 2 minutes.
 - Risk events raised for impossible speed jumps (>85 mph delta behavior) and refresh spam (>30/min/user/screen).
+- Speed anomaly checks include implied mph from geospatial distance/time between consecutive pings, with telemetry speed-delta retained as secondary signal.
+- Strict server-side refresh cadence enforces one update every 10 seconds per actor/screen.
 - Note rollback supports one-click restore from latest 20 historical versions.
 - HTMX is served from local static assets to preserve full offline behavior.
 

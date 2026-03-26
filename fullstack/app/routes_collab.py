@@ -17,6 +17,13 @@ def register_collab_routes(app, ctx):
     to_iso = ctx["to_iso"]
     ATTACHMENTS_DIR = ctx["ATTACHMENTS_DIR"]
     mask_face_identifier = ctx["mask_face_identifier"]
+    html_from_md = ctx["html_from_md"]
+
+    def json_payload_or_400():
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return None, (jsonify({"error": "Invalid JSON payload"}), 400)
+        return payload, None
 
     @app.get("/notes")
     @login_required
@@ -40,11 +47,17 @@ def register_collab_routes(app, ctx):
     @login_required
     @require_permission("notes:write")
     def save_note():
-        payload = request.get_json(force=True)
+        payload, error = json_payload_or_400()
+        if error:
+            return error
         note_id = payload.get("id")
-        title = payload["title"].strip()
+        title = (payload.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "Title required"}), 422
         content_md = payload.get("content_md", "")
         note_type = payload.get("note_type", "training")
+        if note_type not in {"training", "incident"}:
+            return jsonify({"error": "Invalid note_type"}), 422
 
         db = get_db()
         user = current_user()
@@ -114,9 +127,14 @@ def register_collab_routes(app, ctx):
     @login_required
     @require_permission("notes:write")
     def link_notes():
-        payload = request.get_json(force=True)
-        left = int(payload["from_note_id"])
-        right = int(payload["to_note_id"])
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        try:
+            left = int(payload["from_note_id"])
+            right = int(payload["to_note_id"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Invalid from_note_id/to_note_id"}), 422
         link_type = payload.get("link_type", "related")
         db = get_db()
         user = current_user()
@@ -136,6 +154,50 @@ def register_collab_routes(app, ctx):
         )
         db.commit()
         return jsonify({"ok": True})
+
+    @app.get("/api/notes/<int:note_id>/versions")
+    @login_required
+    @require_permission("notes:write")
+    def note_versions(note_id):
+        db = get_db()
+        note = db.execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (note_id,)).fetchone()
+        if not note:
+            return jsonify({"error": "Note not found"}), 404
+        if not can_edit_note(current_user(), note):
+            return jsonify({"error": "Forbidden"}), 403
+
+        rows = db.execute(
+            """
+            SELECT nv.version_no, nv.title, nv.created_at, u.username AS created_by
+            FROM note_versions nv
+            JOIN users u ON u.id = nv.created_by
+            WHERE nv.note_id=?
+            ORDER BY nv.version_no DESC
+            LIMIT 20
+            """,
+            (note_id,),
+        ).fetchall()
+        return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/notes/<int:note_id>/render")
+    @login_required
+    @require_permission("notes:read")
+    def render_note_markdown(note_id):
+        db = get_db()
+        note = db.execute("SELECT owner_id,depot_scope,content_md,title FROM notes WHERE id=?", (note_id,)).fetchone()
+        if not note:
+            return jsonify({"error": "Note not found"}), 404
+        viewer = current_user()
+        if not viewer:
+            return jsonify({"error": "Unauthorized"}), 401
+        if not is_note_manager(viewer) and note["depot_scope"] != viewer["depot_assignment"]:
+            return jsonify({"error": "Forbidden"}), 403
+
+        return jsonify({
+            "note_id": note_id,
+            "title": note["title"],
+            "html": html_from_md(note["content_md"]),
+        })
 
     @app.post("/api/notes/<int:note_id>/rollback/<int:version_no>")
     @login_required
@@ -195,9 +257,16 @@ def register_collab_routes(app, ctx):
     @login_required
     @require_permission("social:use")
     def social_action():
-        payload = request.get_json(force=True)
-        target_id = int(payload["target_user_id"])
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        try:
+            target_id = int(payload["target_user_id"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Invalid target_user_id"}), 422
         relation = payload["relation"]
+        if relation not in {"follow", "block", "report", "favorite", "like", "unfollow"}:
+            return jsonify({"error": "Invalid relation"}), 422
         actor_id = session["user_id"]
         if target_id == actor_id:
             return jsonify({"error": "Cannot relate to self"}), 400

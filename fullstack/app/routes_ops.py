@@ -1,4 +1,5 @@
 import csv
+import math
 import secrets
 from datetime import timedelta
 
@@ -19,6 +20,78 @@ def register_ops_routes(app, ctx):
     create_booking_hold_for_user = ctx["create_booking_hold_for_user"]
     confirm_booking_for_user = ctx["confirm_booking_for_user"]
     ensure_kiosk_user_id = ctx["ensure_kiosk_user_id"]
+    gateway_token = app.config.get("GATEWAY_TOKEN", "")
+
+    def great_circle_miles(lat1, lon1, lat2, lon2):
+        r = 3958.7613
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return r * c
+
+    def json_payload_or_400():
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return None, (jsonify({"error": "Invalid JSON payload"}), 400)
+        return payload, None
+
+    def parse_ping_row(row):
+        try:
+            vehicle_id = row.get("vehicle_id")
+            route_raw = row.get("route_id")
+            if not vehicle_id or route_raw is None:
+                return None
+            return {
+                "vehicle_id": vehicle_id,
+                "route_id": int(route_raw),
+                "stop_sequence": int(row.get("stop_sequence", 1) or 1),
+                "speed_mph": float(row.get("speed_mph", 0) or 0),
+                "ping_time": row.get("ping_time") or to_iso(utc_now()),
+                "lat": float(row.get("lat", 0) or 0),
+                "lon": float(row.get("lon", 0) or 0),
+            }
+        except (TypeError, ValueError):
+            return None
+
+    def insert_ping(db, parsed, source, user_id=None):
+        previous = db.execute(
+            "SELECT speed_mph,ping_time,lat,lon FROM vehicle_pings WHERE vehicle_id=? ORDER BY ping_time DESC LIMIT 1",
+            (parsed["vehicle_id"],),
+        ).fetchone()
+        if previous:
+            delta_hours = max(
+                1 / 3600,
+                (from_iso(parsed["ping_time"]) - from_iso(previous["ping_time"])).total_seconds() / 3600,
+            )
+            implied_speed = great_circle_miles(previous["lat"], previous["lon"], parsed["lat"], parsed["lon"]) / delta_hours
+            if implied_speed > 85:
+                log_risk(
+                    "impossible_speed_jump",
+                    f"vehicle={parsed['vehicle_id']}, implied_mph={round(implied_speed,2)}, source={source}",
+                    user_id,
+                )
+            if abs(parsed["speed_mph"] - previous["speed_mph"]) / delta_hours > 85:
+                log_risk(
+                    "impossible_speed_jump",
+                    f"vehicle={parsed['vehicle_id']}, speed_delta_from={previous['speed_mph']}, speed_delta_to={parsed['speed_mph']}, source={source}",
+                    user_id,
+                )
+        db.execute(
+            "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                parsed["vehicle_id"],
+                parsed["route_id"],
+                parsed["stop_sequence"],
+                parsed["lat"],
+                parsed["lon"],
+                parsed["speed_mph"],
+                parsed["ping_time"],
+                source,
+            ),
+        )
 
     @app.get("/api/heartbeat")
     def heartbeat():
@@ -28,6 +101,22 @@ def register_ops_routes(app, ctx):
         bucket = now.strftime("%Y-%m-%dT%H:%M")
         previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
         db = get_db()
+        actor_key = f"user:{user_id}" if user_id else f"anon:{session.setdefault('anon_refresh_id', secrets.token_hex(12))}"
+
+        cadence = db.execute(
+            "SELECT last_seen FROM refresh_cadence WHERE actor_key=? AND screen=?",
+            (actor_key, screen),
+        ).fetchone()
+        if cadence and (now - from_iso(cadence["last_seen"])) < timedelta(seconds=10):
+            retry_after = max(1, 10 - int((now - from_iso(cadence["last_seen"])) .total_seconds()))
+            return jsonify({"error": "Refresh allowed once every 10 seconds", "retry_after_seconds": retry_after}), 429
+
+        db.execute(
+            "INSERT INTO refresh_cadence (actor_key,screen,last_seen) VALUES (?,?,?) ON CONFLICT(actor_key,screen) DO UPDATE SET last_seen=excluded.last_seen",
+            (actor_key, screen, to_iso(now)),
+        )
+        db.commit()
+
         if user_id:
             row = db.execute(
                 "SELECT attempt_count FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket=?",
@@ -143,7 +232,9 @@ def register_ops_routes(app, ctx):
     @login_required
     @require_permission("booking:create")
     def create_hold():
-        payload = request.get_json(force=True)
+        payload, error = json_payload_or_400()
+        if error:
+            return error
         response, error, status = create_booking_hold_for_user(session["user_id"], payload)
         if error:
             return jsonify(error), status
@@ -153,7 +244,9 @@ def register_ops_routes(app, ctx):
     @login_required
     @require_permission("booking:create")
     def confirm_booking():
-        payload = request.get_json(force=True)
+        payload, error = json_payload_or_400()
+        if error:
+            return error
         hold_nonce = payload.get("hold_nonce")
         request_nonce = payload.get("request_nonce")
         contact = payload.get("contact", "")
@@ -179,7 +272,9 @@ def register_ops_routes(app, ctx):
 
     @app.post("/api/kiosk/bookings/hold")
     def kiosk_create_hold():
-        payload = request.get_json(force=True)
+        payload, error = json_payload_or_400()
+        if error:
+            return error
         kiosk_user_id = ensure_kiosk_user_id(get_db())
         response, error, status = create_booking_hold_for_user(kiosk_user_id, payload)
         if error:
@@ -188,7 +283,9 @@ def register_ops_routes(app, ctx):
 
     @app.post("/api/kiosk/bookings/confirm")
     def kiosk_confirm_booking():
-        payload = request.get_json(force=True)
+        payload, error = json_payload_or_400()
+        if error:
+            return error
         hold_nonce = payload.get("hold_nonce")
         request_nonce = payload.get("request_nonce")
         contact = payload.get("contact", "")
@@ -208,52 +305,59 @@ def register_ops_routes(app, ctx):
         reader = csv.DictReader(text.splitlines())
         db = get_db()
         inserted = 0
+        invalid_rows = 0
         for row in reader:
-            vehicle_id = row.get("vehicle_id")
-            route_raw = row.get("route_id")
-            if not vehicle_id or route_raw is None:
+            parsed = parse_ping_row(row)
+            if not parsed:
+                invalid_rows += 1
                 continue
-            route_id = int(route_raw)
-            stop_sequence = int(row.get("stop_sequence", 1) or 1)
-            speed_mph = float(row.get("speed_mph", 0) or 0)
-            ping_time = row.get("ping_time") or to_iso(utc_now())
-            previous = db.execute(
-                "SELECT speed_mph,ping_time FROM vehicle_pings WHERE vehicle_id=? ORDER BY ping_time DESC LIMIT 1",
-                (vehicle_id,),
-            ).fetchone()
-            if previous:
-                delta_hours = max(
-                    1 / 3600,
-                    (from_iso(ping_time) - from_iso(previous["ping_time"])).total_seconds() / 3600,
-                )
-                if abs(speed_mph - previous["speed_mph"]) / delta_hours > 85:
-                    log_risk(
-                        "impossible_speed_jump",
-                        f"vehicle={vehicle_id}, from={previous['speed_mph']}, to={speed_mph}",
-                        session["user_id"],
-                    )
-            db.execute(
-                "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    vehicle_id,
-                    route_id,
-                    stop_sequence,
-                    float(row.get("lat", 0)),
-                    float(row.get("lon", 0)),
-                    speed_mph,
-                    ping_time,
-                    "csv",
-                ),
-            )
+            insert_ping(db, parsed, "csv", session.get("user_id"))
             inserted += 1
         db.commit()
+        if invalid_rows:
+            app.logger.warning("vehicle_ping_upload_invalid_rows source=csv invalid_rows=%s", invalid_rows)
         return jsonify({"ok": True, "inserted": inserted})
+
+    @app.post("/api/vehicle-pings/gateway")
+    def gateway_vehicle_pings():
+        if not gateway_token:
+            return jsonify({"error": "Gateway ingestion disabled: token not configured"}), 503
+        provided = request.headers.get("X-Gateway-Token", "")
+        if provided != gateway_token:
+            return jsonify({"error": "Invalid gateway token"}), 403
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        pings = payload.get("pings", [])
+        if not isinstance(pings, list):
+            return jsonify({"error": "pings must be a list"}), 422
+
+        db = get_db()
+        inserted = 0
+        invalid_rows = 0
+        for row in pings:
+            if not isinstance(row, dict):
+                invalid_rows += 1
+                continue
+            parsed = parse_ping_row(row)
+            if not parsed:
+                invalid_rows += 1
+                continue
+            insert_ping(db, parsed, "lan_gateway", None)
+            inserted += 1
+        db.commit()
+        if invalid_rows:
+            app.logger.warning("vehicle_ping_upload_invalid_rows source=lan_gateway invalid_rows=%s", invalid_rows)
+        return jsonify({"ok": True, "inserted": inserted, "source": "lan_gateway"})
 
     @app.post("/api/depot/bins/<int:bin_id>/freeze")
     @login_required
     @require_permission("depot:manage")
     def freeze_bin(bin_id):
-        frozen = int(request.form.get("frozen", "1"))
+        try:
+            frozen = int(request.form.get("frozen", "1"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid frozen value"}), 422
         get_db().execute("UPDATE bins SET frozen=? WHERE id=?", (frozen, bin_id))
         get_db().commit()
         return jsonify({"ok": True, "frozen": bool(frozen)})
@@ -262,14 +366,19 @@ def register_ops_routes(app, ctx):
     @login_required
     @require_permission("depot:manage")
     def allocate_inventory():
-        payload = request.get_json(force=True)
+        payload, error = json_payload_or_400()
+        if error:
+            return error
         request_nonce = payload.get("request_nonce")
         ok, msg = assert_nonce(session["user_id"], "inventory_adjust", request_nonce)
         if not ok:
             return jsonify({"error": msg}), 409
-        bin_id = int(payload["bin_id"])
-        vol = float(payload["volume_cuft"])
-        weight = float(payload["weight_lb"])
+        try:
+            bin_id = int(payload["bin_id"])
+            vol = float(payload["volume_cuft"])
+            weight = float(payload["weight_lb"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Invalid bin_id/volume_cuft/weight_lb"}), 422
 
         db = get_db()
         db.execute("BEGIN IMMEDIATE")

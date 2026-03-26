@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <title>MetroOps Portal</title>
   <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
@@ -11,7 +12,10 @@
   <header class="topbar">
     <h1>MetroOps Shuttle & Depot Portal</h1>
     {% if session.user_id %}
-      <form method="post" action="{{ url_for('logout') }}"><button>Logout</button></form>
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button>Logout</button>
+      </form>
     {% endif %}
   </header>
   <div id="offline-banner" class="offline hidden">Offline&mdash;showing last known data</div>
