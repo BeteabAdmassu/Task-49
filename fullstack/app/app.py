@@ -462,7 +462,7 @@ def create_app():
         if request.endpoint in refresh_endpoints:
             now = utc_now()
             db = get_db()
-            screen = request.args.get("screen") or request.path
+            screen = request.args.get("screen") or request.full_path
             actor_key = (
                 f"user:{session['user_id']}"
                 if session.get("user_id")

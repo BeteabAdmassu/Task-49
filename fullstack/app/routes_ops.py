@@ -95,54 +95,6 @@ def register_ops_routes(app, ctx):
 
     @app.get("/api/heartbeat")
     def heartbeat():
-        user_id = session.get("user_id", 0)
-        screen = request.args.get("screen", "unknown")
-        now = utc_now()
-        bucket = now.strftime("%Y-%m-%dT%H:%M")
-        previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
-        db = get_db()
-        actor_key = f"user:{user_id}" if user_id else f"anon:{session.setdefault('anon_refresh_id', secrets.token_hex(12))}"
-
-        cadence = db.execute(
-            "SELECT last_seen FROM refresh_cadence WHERE actor_key=? AND screen=?",
-            (actor_key, screen),
-        ).fetchone()
-        if cadence and (now - from_iso(cadence["last_seen"])) < timedelta(seconds=10):
-            retry_after = max(1, 10 - int((now - from_iso(cadence["last_seen"])) .total_seconds()))
-            return jsonify({"error": "Refresh allowed once every 10 seconds", "retry_after_seconds": retry_after}), 429
-
-        db.execute(
-            "INSERT INTO refresh_cadence (actor_key,screen,last_seen) VALUES (?,?,?) ON CONFLICT(actor_key,screen) DO UPDATE SET last_seen=excluded.last_seen",
-            (actor_key, screen, to_iso(now)),
-        )
-        db.commit()
-
-        if user_id:
-            row = db.execute(
-                "SELECT attempt_count FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket=?",
-                (user_id, screen, bucket),
-            ).fetchone()
-            count = (row["attempt_count"] if row else 0) + 1
-            if row:
-                db.execute(
-                    "UPDATE refresh_attempts SET attempt_count=? WHERE user_id=? AND screen=? AND minute_bucket=?",
-                    (count, user_id, screen, bucket),
-                )
-            else:
-                db.execute(
-                    "INSERT INTO refresh_attempts (user_id,screen,minute_bucket,attempt_count) VALUES (?,?,?,?)",
-                    (user_id, screen, bucket, count),
-                )
-            db.commit()
-
-            rolling = db.execute(
-                "SELECT COALESCE(SUM(attempt_count),0) FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket IN (?,?)",
-                (user_id, screen, bucket, previous_bucket),
-            ).fetchone()[0]
-            if rolling > 30:
-                log_risk("excessive_refresh", f"screen={screen}, count_60s={rolling}", user_id)
-                return jsonify({"error": "Refresh rate exceeded", "retry_after_seconds": 10}), 429
-
         return jsonify({"ok": True, "time": format_clock(utc_now())})
 
     @app.get("/api/arrival-board")

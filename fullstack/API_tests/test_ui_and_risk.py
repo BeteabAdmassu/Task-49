@@ -146,6 +146,14 @@ def test_strict_ten_second_refresh_cap(tmp_path):
     assert second.status_code == 429
 
 
+def test_refresh_governance_applies_to_arrival_endpoint(tmp_path):
+    client, _app = build_client(tmp_path)
+    first = client.get("/api/arrival-board")
+    assert first.status_code == 200
+    second = client.get("/api/arrival-board")
+    assert second.status_code == 429
+
+
 def test_depot_mutation_requires_permission(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
@@ -583,3 +591,17 @@ def test_attachment_size_limit_and_unauthorized_matrix(tmp_path):
         json={"username": "x", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "A"},
     )
     assert admin_denied.status_code == 403
+
+    logout_denied = client.post("/logout")
+    assert logout_denied.status_code == 403
+
+
+def test_blocked_profile_visibility_denied(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+    block = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "block"})
+    assert block.status_code == 200
+
+    login_supervisor(client)
+    denied = client.get("/profiles/1")
+    assert denied.status_code == 403

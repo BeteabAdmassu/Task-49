@@ -131,15 +131,16 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
     with app.app_context():
         db = app.get_db()
         dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        departure_time = (datetime.now(UTC) + timedelta(hours=5)).isoformat()
         db.execute(
             "UPDATE departures SET departure_time=?, base_price=? WHERE id=?",
-            ((datetime.now(UTC) + timedelta(hours=5)).isoformat(), 20.0, dep_id),
+            (departure_time, 20.0, dep_id),
         )
         db.execute("DELETE FROM rate_plans")
-        today = datetime.now(UTC).date().isoformat()
+        dep_date = datetime.fromisoformat(departure_time).date().isoformat()
         db.execute(
             "INSERT INTO rate_plans (name,start_date,end_date,amount_delta) VALUES (?,?,?,?)",
-            ("Test Delta", today, today, 5.0),
+            ("Test Delta", dep_date, dep_date, 5.0),
         )
         db.commit()
 
@@ -209,3 +210,31 @@ def test_concurrent_holds_prevent_overbooking(tmp_path):
         results = list(executor.map(hold, [client_a, client_b]))
 
     assert sorted(results) == [200, 409]
+
+
+def test_pricing_deterministic_edge_rounding_and_discount(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    with app.app_context():
+        db = app.get_db()
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        departure_time = (datetime.now(UTC) + timedelta(hours=6)).isoformat()
+        db.execute("UPDATE departures SET departure_time=?, base_price=? WHERE id=?", (departure_time, 10.015, dep_id))
+        db.execute("DELETE FROM rate_plans")
+        dep_date = datetime.fromisoformat(departure_time).date().isoformat()
+        db.execute(
+            "INSERT INTO rate_plans (name,start_date,end_date,amount_delta) VALUES (?,?,?,?)",
+            ("Discount", dep_date, dep_date, -0.02),
+        )
+        db.commit()
+
+    hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    nonce = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    confirm = auth_post(
+        client,
+        "/api/bookings/confirm",
+        json={"hold_nonce": hold.get_json()["hold_nonce"], "request_nonce": nonce, "contact": "edge@test.local"},
+    )
+    assert confirm.status_code == 200
+    assert confirm.get_json()["total_price"] == 10.0
