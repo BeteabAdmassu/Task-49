@@ -228,6 +228,7 @@ def register_collab_routes(app, ctx):
 
     @app.get("/api/notes/rollup")
     @login_required
+    @require_permission("notes:read")
     def notes_rollup():
         db = get_db()
         user = current_user()
@@ -332,9 +333,10 @@ def register_collab_routes(app, ctx):
             )
         return render_template("profile.html", owner=owner, mutual=mutual, masked_face=masked_face)
 
-    def assign_variant(user_id, experiment_id):
+    def assign_variant(user_id, experiment_id, split_a_percent):
         hash_key = hashlib.sha256(f"{user_id}:{experiment_id}".encode("utf-8")).hexdigest()
-        return "A" if int(hash_key[-1], 16) % 2 == 0 else "B"
+        bucket = int(hash_key[:8], 16) % 100
+        return "A" if bucket < split_a_percent else "B"
 
     @app.get("/api/experiments/assign/<widget_key>")
     @login_required
@@ -348,7 +350,7 @@ def register_collab_routes(app, ctx):
             (exp["id"], session["user_id"]),
         ).fetchone()
         if not assignment:
-            variant = assign_variant(session["user_id"], exp["id"])
+            variant = assign_variant(session["user_id"], exp["id"], exp["split_a_percent"])
             db.execute(
                 "INSERT INTO experiment_assignments (experiment_id,user_id,variant,created_at) VALUES (?,?,?,?)",
                 (exp["id"], session["user_id"], variant, to_iso(utc_now())),
@@ -366,13 +368,91 @@ def register_collab_routes(app, ctx):
         exps = get_db().execute("SELECT * FROM experiments ORDER BY widget_key").fetchall()
         return render_template("experiments.html", experiments=exps)
 
+    def log_experiment_changes(db, experiment, updates, changed_by, changed_at):
+        for field_name, new_value in updates.items():
+            old_value = experiment[field_name]
+            if str(old_value) == str(new_value):
+                continue
+            db.execute(
+                """
+                INSERT INTO experiment_audit_log
+                (experiment_id,field_name,old_value,new_value,changed_by,changed_at)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (experiment["id"], field_name, str(old_value), str(new_value), changed_by, changed_at),
+            )
+
+    @app.post("/supervisor/experiments/<int:exp_id>")
+    @login_required
+    @require_permission("experiments:manage")
+    def update_experiment(exp_id):
+        db = get_db()
+        exp = db.execute("SELECT * FROM experiments WHERE id=?", (exp_id,)).fetchone()
+        if not exp:
+            abort(404)
+
+        try:
+            enabled = int(request.form.get("enabled", "1"))
+        except ValueError:
+            return jsonify({"error": "enabled must be 0 or 1"}), 422
+        if enabled not in {0, 1}:
+            return jsonify({"error": "enabled must be 0 or 1"}), 422
+
+        label_a = (request.form.get("label_a") or "").strip()
+        label_b = (request.form.get("label_b") or "").strip()
+        if not label_a or not label_b:
+            return jsonify({"error": "Both labels are required"}), 422
+
+        try:
+            split_a_percent = int(request.form.get("split_a_percent", "50"))
+        except ValueError:
+            return jsonify({"error": "split_a_percent must be an integer"}), 422
+        if split_a_percent < 0 or split_a_percent > 100:
+            return jsonify({"error": "split_a_percent must be between 0 and 100"}), 422
+
+        updates = {
+            "enabled": enabled,
+            "label_a": label_a,
+            "label_b": label_b,
+            "split_a_percent": split_a_percent,
+        }
+        db.execute(
+            "UPDATE experiments SET enabled=?, label_a=?, label_b=?, split_a_percent=? WHERE id=?",
+            (enabled, label_a, label_b, split_a_percent, exp_id),
+        )
+        user = current_user()
+        if not user:
+            abort(401)
+        log_experiment_changes(db, exp, updates, user["id"], to_iso(utc_now()))
+        db.commit()
+        return redirect(url_for("supervisor_experiments"))
+
     @app.post("/supervisor/experiments/<int:exp_id>/toggle")
     @login_required
     @require_permission("experiments:manage")
     def toggle_experiment(exp_id):
+        db = get_db()
+        exp = db.execute("SELECT * FROM experiments WHERE id=?", (exp_id,)).fetchone()
+        if not exp:
+            abort(404)
         enabled = int(request.form.get("enabled", "1"))
-        get_db().execute("UPDATE experiments SET enabled=? WHERE id=?", (enabled, exp_id))
-        get_db().commit()
+        db.execute("UPDATE experiments SET enabled=? WHERE id=?", (enabled, exp_id))
+        user = current_user()
+        if not user:
+            abort(401)
+        log_experiment_changes(
+            db,
+            exp,
+            {
+                "enabled": enabled,
+                "label_a": exp["label_a"],
+                "label_b": exp["label_b"],
+                "split_a_percent": exp["split_a_percent"],
+            },
+            user["id"],
+            to_iso(utc_now()),
+        )
+        db.commit()
         return redirect(url_for("supervisor_experiments"))
 
     @app.get("/analyst/metrics")

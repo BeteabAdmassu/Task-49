@@ -135,7 +135,7 @@ python -m app.app
 - Database bootstrap and migration logic moved to `app/db_bootstrap.py` to reduce `app.py` coupling.
 - Collaboration/knowledge routes (notes, social, experiments, metrics) moved to `app/routes_collab.py`.
 - Operations routes (arrival board, booking, kiosk booking, depot inventory, ping ingest) moved to `app/routes_ops.py`.
-- Runtime cache/artifact files are ignored via `fullstack/.gitignore`.
+- Runtime cache/artifact files are ignored via `.gitignore` at the repository root.
 
 ## Tests
 

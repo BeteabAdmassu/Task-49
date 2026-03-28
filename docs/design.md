@@ -37,6 +37,6 @@
 - HTMX is served from local static assets to preserve full offline behavior.
 
 ## Maintainability Notes
-- Database schema/seed/migration bootstrap is isolated in `fullstack/app/db_bootstrap.py`.
-- Collaboration routes are isolated in `fullstack/app/routes_collab.py` to reduce domain coupling in the app entry file.
-- Booking/depot/service-visibility routes are isolated in `fullstack/app/routes_ops.py`.
+- Database schema/seed/migration bootstrap is isolated in `repo/app/db_bootstrap.py`.
+- Collaboration routes are isolated in `repo/app/routes_collab.py` to reduce domain coupling in the app entry file.
+- Booking/depot/service-visibility routes are isolated in `repo/app/routes_ops.py`.

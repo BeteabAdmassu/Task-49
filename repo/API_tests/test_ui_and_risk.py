@@ -536,6 +536,94 @@ def test_experiment_assignment_population_near_5050(tmp_path):
     assert 0.45 <= b_ratio <= 0.55
 
 
+def test_experiment_control_update_requires_permission_and_writes_audit(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    denied = authed_post(
+        client,
+        "/supervisor/experiments/1",
+        data={"enabled": "1", "label_a": "Fast", "label_b": "Stable", "split_a_percent": "70"},
+    )
+    assert denied.status_code == 403
+
+    login_supervisor(client)
+    updated = authed_post(
+        client,
+        "/supervisor/experiments/1",
+        data={
+            "enabled": "0",
+            "label_a": "Pilot A",
+            "label_b": "Pilot B",
+            "split_a_percent": "80",
+        },
+        follow_redirects=False,
+    )
+    assert updated.status_code == 302
+
+    with app.app_context():
+        db = app.get_db()
+        exp = db.execute("SELECT enabled,label_a,label_b,split_a_percent FROM experiments WHERE id=1").fetchone()
+        assert exp["enabled"] == 0
+        assert exp["label_a"] == "Pilot A"
+        assert exp["label_b"] == "Pilot B"
+        assert exp["split_a_percent"] == 80
+        audit = db.execute(
+            "SELECT COUNT(*) FROM experiment_audit_log WHERE experiment_id=1 AND changed_by=2"
+        ).fetchone()[0]
+        assert audit >= 1
+
+
+def test_experiment_assignment_respects_configured_split_policy(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    updated = authed_post(
+        client,
+        "/supervisor/experiments/1",
+        data={
+            "enabled": "1",
+            "label_a": "Version A",
+            "label_b": "Version B",
+            "split_a_percent": "80",
+        },
+    )
+    assert updated.status_code == 302
+
+    with app.app_context():
+        db = app.get_db()
+        now = datetime.now(UTC).isoformat()
+        seed_hash = "pbkdf2:sha256:600000$seed$hash"
+        rows = [(f"split_user_{i}", seed_hash, "employee", "Main Depot", now) for i in range(1, 801)]
+        db.executemany(
+            "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
+            rows,
+        )
+        db.commit()
+        user_ids = [r[0] for r in db.execute("SELECT id FROM users WHERE username LIKE 'split_user_%' ORDER BY id").fetchall()]
+
+    a_count = 0
+    b_count = 0
+    for uid in user_ids:
+        with client.session_transaction() as sess:
+            sess["user_id"] = uid
+            sess["last_seen"] = datetime.now(UTC).isoformat()
+            sess["csrf_token"] = "seed"
+        assignment = client.get("/api/experiments/assign/suggested-times")
+        assert assignment.status_code == 200
+        variant = assignment.get_json()["variant"]
+        if variant == "A":
+            a_count += 1
+        else:
+            b_count += 1
+
+    total = a_count + b_count
+    a_ratio = a_count / total
+    b_ratio = b_count / total
+    assert 0.75 <= a_ratio <= 0.85
+    assert 0.15 <= b_ratio <= 0.25
+
+
 def test_anomaly_notes_features_social_and_masking(tmp_path):
     client, app = build_client(tmp_path)
     login_supervisor(client)
@@ -808,6 +896,24 @@ def test_note_link_semantics_require_incident_training_pairs(tmp_path):
     assert ii.status_code == 422
     ti = authed_post(client, "/api/notes/link", json={"from_note_id": t1, "to_note_id": i1, "link_type": "related"})
     assert ti.status_code == 200
+
+
+def test_notes_rollup_requires_notes_read_permission(tmp_path):
+    client, app = build_client(tmp_path)
+
+    unauthenticated = client.get("/api/notes/rollup")
+    assert unauthenticated.status_code == 302
+
+    login_agent(client)
+    allowed = client.get("/api/notes/rollup")
+    assert allowed.status_code == 200
+
+    with app.app_context():
+        app.get_db().execute("DELETE FROM permissions WHERE role='employee' AND permission='notes:read'")
+        app.get_db().commit()
+
+    denied = client.get("/api/notes/rollup")
+    assert denied.status_code == 403
 
 
 def test_nonce_cross_action_misuse_rejected(tmp_path):

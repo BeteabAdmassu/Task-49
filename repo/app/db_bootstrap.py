@@ -235,7 +235,8 @@ CREATE TABLE IF NOT EXISTS experiments (
     widget_key TEXT NOT NULL UNIQUE,
     enabled INTEGER NOT NULL DEFAULT 1,
     label_a TEXT NOT NULL DEFAULT 'Version A',
-    label_b TEXT NOT NULL DEFAULT 'Version B'
+    label_b TEXT NOT NULL DEFAULT 'Version B',
+    split_a_percent INTEGER NOT NULL DEFAULT 50 CHECK(split_a_percent >= 0 AND split_a_percent <= 100)
 );
 CREATE TABLE IF NOT EXISTS experiment_assignments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,6 +247,17 @@ CREATE TABLE IF NOT EXISTS experiment_assignments (
     UNIQUE(experiment_id, user_id),
     FOREIGN KEY(experiment_id) REFERENCES experiments(id),
     FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS experiment_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL,
+    field_name TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    changed_by INTEGER NOT NULL,
+    changed_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(id),
+    FOREIGN KEY(changed_by) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS analytics_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,6 +328,21 @@ def _ensure_migrations(db):
     )
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS experiment_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id INTEGER NOT NULL,
+            field_name TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            changed_by INTEGER NOT NULL,
+            changed_at TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES experiments(id),
+            FOREIGN KEY(changed_by) REFERENCES users(id)
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS depot_bin_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             rule_type TEXT NOT NULL CHECK(rule_type IN ('bin_type','bin_status')),
@@ -337,6 +364,10 @@ def _ensure_migrations(db):
         WHERE depot_scope IS NULL
         """
     )
+    experiment_cols = {row[1] for row in db.execute("PRAGMA table_info(experiments)").fetchall()}
+    if "split_a_percent" not in experiment_cols:
+        db.execute("ALTER TABLE experiments ADD COLUMN split_a_percent INTEGER NOT NULL DEFAULT 50")
+    db.execute("UPDATE experiments SET split_a_percent=50 WHERE split_a_percent IS NULL")
     default_rules = [
         ("bin_type", "standard"),
         ("bin_type", "cold"),
@@ -440,7 +471,7 @@ def initialize_database(db_path, utc_now, to_iso):
             (zone_id, "A-01", "standard", 500, 4000, "available"),
         )
         db.execute(
-            "INSERT INTO experiments (widget_key,enabled,label_a,label_b) VALUES ('suggested-times',1,'Version A','Version B')"
+            "INSERT INTO experiments (widget_key,enabled,label_a,label_b,split_a_percent) VALUES ('suggested-times',1,'Version A','Version B',50)"
         )
 
     for role, perms in permissions.items():

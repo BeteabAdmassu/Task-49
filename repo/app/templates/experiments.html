@@ -3,19 +3,33 @@
 <section class="panel">
   <h2>Supervisor Experiment Controls</h2>
   <table>
-    <thead><tr><th>Widget</th><th>Status</th><th>Label A</th><th>Label B</th><th>Action</th></tr></thead>
+    <thead><tr><th>Widget</th><th>Status</th><th>Current Labels</th><th>Split Policy</th><th>Controls</th></tr></thead>
     <tbody>
       {% for exp in experiments %}
       <tr>
         <td>{{ exp.widget_key }}</td>
         <td>{{ 'Enabled' if exp.enabled else 'Disabled' }}</td>
-        <td>{{ exp.label_a }}</td>
-        <td>{{ exp.label_b }}</td>
+        <td>A: {{ exp.label_a }}<br>B: {{ exp.label_b }}</td>
+        <td>A: {{ exp.split_a_percent }}% / B: {{ 100 - exp.split_a_percent }}%</td>
         <td>
-          <form method="post" action="{{ url_for('toggle_experiment', exp_id=exp.id) }}">
+          <form method="post" action="{{ url_for('update_experiment', exp_id=exp.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="enabled" value="{{ 0 if exp.enabled else 1 }}">
-            <button>{{ 'Disable' if exp.enabled else 'Enable' }}</button>
+            <label>Status
+              <select name="enabled">
+                <option value="1" {% if exp.enabled %}selected{% endif %}>Enabled</option>
+                <option value="0" {% if not exp.enabled %}selected{% endif %}>Disabled</option>
+              </select>
+            </label>
+            <label>Label A
+              <input type="text" name="label_a" value="{{ exp.label_a }}" maxlength="64" required>
+            </label>
+            <label>Label B
+              <input type="text" name="label_b" value="{{ exp.label_b }}" maxlength="64" required>
+            </label>
+            <label>Split A %
+              <input type="number" name="split_a_percent" value="{{ exp.split_a_percent }}" min="0" max="100" required>
+            </label>
+            <button>Save</button>
           </form>
         </td>
       </tr>
