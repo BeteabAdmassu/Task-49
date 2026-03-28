@@ -1,4 +1,5 @@
 import importlib
+import logging
 import os
 from io import BytesIO
 from datetime import UTC, datetime, timedelta
@@ -637,6 +638,9 @@ def test_malformed_payloads_return_4xx_not_500(tmp_path):
     client, _app = build_client(tmp_path)
     login_supervisor(client)
 
+    missing_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2})
+    assert missing_relation.status_code == 422
+
     bad_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
     assert bad_relation.status_code == 422
 
@@ -647,6 +651,23 @@ def test_malformed_payloads_return_4xx_not_500(tmp_path):
         json={"request_nonce": nonce, "bin_id": "bad", "volume_cuft": "x", "weight_lb": "y"},
     )
     assert bad_allocate.status_code == 422
+
+
+def test_face_identifier_logging_uses_mask_only(tmp_path, caplog):
+    client, app = build_client(tmp_path)
+    caplog.set_level(logging.INFO)
+    login_agent(client)
+    raw_identifier = "FACE-SECRET-9988"
+    with app.app_context():
+        encrypted = app.fernet.encrypt(raw_identifier.encode("utf-8"))
+        app.get_db().execute("UPDATE users SET face_identifier_encrypted=? WHERE id=?", (encrypted, 1))
+        app.get_db().commit()
+
+    response = client.get("/profiles/1")
+    assert response.status_code == 200
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert raw_identifier not in logs
+    assert "FA***88" in logs
 
 
 def test_attachment_size_limit_and_unauthorized_matrix(tmp_path):

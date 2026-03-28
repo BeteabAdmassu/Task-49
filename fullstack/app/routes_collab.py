@@ -17,6 +17,7 @@ def register_collab_routes(app, ctx):
     to_iso = ctx["to_iso"]
     ATTACHMENTS_DIR = ctx["ATTACHMENTS_DIR"]
     mask_face_identifier = ctx["mask_face_identifier"]
+    face_identifier_log_value = ctx["face_identifier_log_value"]
     html_from_md = ctx["html_from_md"]
 
     def json_payload_or_400():
@@ -264,7 +265,9 @@ def register_collab_routes(app, ctx):
             target_id = int(payload["target_user_id"])
         except (KeyError, TypeError, ValueError):
             return jsonify({"error": "Invalid target_user_id"}), 422
-        relation = payload["relation"]
+        relation = payload.get("relation")
+        if relation is None:
+            return jsonify({"error": "relation is required"}), 422
         if relation not in {"follow", "block", "report", "favorite", "like", "unfollow"}:
             return jsonify({"error": "Invalid relation"}), 422
         actor_id = session["user_id"]
@@ -316,6 +319,11 @@ def register_collab_routes(app, ctx):
         if owner["face_identifier_encrypted"]:
             raw = app.fernet.decrypt(owner["face_identifier_encrypted"]).decode("utf-8")
             masked_face = mask_face_identifier(raw)
+            app.logger.info(
+                "profile_face_identifier_access owner_id=%s masked_face_identifier=%s",
+                owner["id"],
+                face_identifier_log_value(raw),
+            )
         return render_template("profile.html", owner=owner, mutual=mutual, masked_face=masked_face)
 
     def assign_variant(user_id, experiment_id):

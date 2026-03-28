@@ -79,6 +79,14 @@ If `METROOPS_GATEWAY_TOKEN` is not configured, startup logs a warning and LAN ga
 
 ## Tests
 
+Cross-platform (Windows/Linux/macOS):
+
+```bash
+python -m pytest unit_tests API_tests
+```
+
+Bash helper script (Linux/macOS or Git Bash):
+
 ```bash
 ./run_tests.sh
 ```

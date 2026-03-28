@@ -161,6 +161,10 @@ def create_app():
             return ""
         return f"{value[:2]}***{value[-2:]}"
 
+    def face_identifier_log_value(value):
+        masked = mask_face_identifier(value)
+        return masked if masked else "<masked-empty>"
+
     def password_policy_error(password):
         if len(password or "") < MIN_PASSWORD_LENGTH:
             return f"Password must be at least {MIN_PASSWORD_LENGTH} characters"
@@ -687,6 +691,7 @@ def create_app():
             "to_iso": to_iso,
             "ATTACHMENTS_DIR": ATTACHMENTS_DIR,
             "mask_face_identifier": mask_face_identifier,
+            "face_identifier_log_value": face_identifier_log_value,
             "html_from_md": html_from_md,
         },
     )
