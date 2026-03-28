@@ -42,9 +42,10 @@
     </div>
   </article>
 
-  <article class="panel">
+  <article class="panel" id="recommendation-widget" data-widget-key="suggested-times">
     <h2>Operations</h2>
-    <p>Recommendation widget version: <strong id="exp-label">Loading...</strong></p>
+    <p>Recommendation widget version: <strong id="exp-label" data-exp-label>Loading...</strong></p>
+    <p><a id="recommendation-cta" data-rec-action href="{{ url_for('kiosk') }}">Use recommended booking flow</a></p>
     <ul>
       <li><a href="{{ url_for('kiosk') }}">Rider Kiosk</a></li>
       <li><a href="{{ url_for('notes_index') }}">Learning Records</a></li>
@@ -61,16 +62,4 @@
   </article>
 </section>
 
-<script>
-  async function loadExperimentLabel() {
-    try {
-      const response = await fetch("/api/experiments/assign/suggested-times");
-      const data = await response.json();
-      document.getElementById("exp-label").textContent = data.label;
-    } catch (_err) {
-      document.getElementById("exp-label").textContent = "Version A";
-    }
-  }
-  loadExperimentLabel();
-</script>
 {% endblock %}

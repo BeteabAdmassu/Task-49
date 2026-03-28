@@ -56,3 +56,71 @@ document.body.addEventListener("htmx:afterSwap", () => {
     setOffline(false);
   }
 });
+
+async function emitRecommendationTelemetry(eventType, widgetKey, variantLabel) {
+  if (!widgetKey || !variantLabel) return;
+  await fetch("/api/analytics/recommendation-event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      event_type: eventType,
+      widget_key: widgetKey,
+      variant_label: variantLabel,
+    }),
+    credentials: "same-origin",
+    keepalive: true,
+  });
+}
+
+function initRecommendationWidgetTelemetry() {
+  const widget = document.getElementById("recommendation-widget");
+  const labelNode = document.getElementById("exp-label");
+  if (!widget || !labelNode) return;
+
+  const widgetKey = widget.dataset.widgetKey || "suggested-times";
+  let variantLabel = "Version A";
+  let impressionSent = false;
+
+  const sendImpressionOnce = () => {
+    if (impressionSent) return;
+    impressionSent = true;
+    void emitRecommendationTelemetry("rec_impression", widgetKey, variantLabel);
+  };
+
+  fetch(`/api/experiments/assign/${encodeURIComponent(widgetKey)}`, {
+    credentials: "same-origin",
+    cache: "no-store",
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      variantLabel = data.label || "Version A";
+      labelNode.textContent = variantLabel;
+    })
+    .catch(() => {
+      variantLabel = "Version A";
+      labelNode.textContent = variantLabel;
+    })
+    .finally(() => {
+      if (typeof window.IntersectionObserver === "function") {
+        const observer = new IntersectionObserver((entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            sendImpressionOnce();
+            observer.disconnect();
+          }
+        });
+        observer.observe(widget);
+      } else {
+        sendImpressionOnce();
+      }
+    });
+
+  widget.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const actionable = target.closest("a,button,[data-rec-action]");
+    if (!actionable) return;
+    void emitRecommendationTelemetry("rec_click", widgetKey, variantLabel);
+  });
+}
+
+initRecommendationWidgetTelemetry();

@@ -179,6 +179,24 @@ def test_dashboard_contains_htmx_seat_refresh(tmp_path):
     assert b"screen=dashboard-seat-availability" in page.data
 
 
+def test_dashboard_recommendation_widget_telemetry_hooks_present(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    page = client.get("/dashboard")
+    assert page.status_code == 200
+    assert b'id="recommendation-widget"' in page.data
+    assert b'data-widget-key="suggested-times"' in page.data
+    assert b'id="exp-label"' in page.data
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    body = js.get_data(as_text=True)
+    assert "/api/analytics/recommendation-event" in body
+    assert "rec_impression" in body
+    assert "rec_click" in body
+
+
 def test_offline_banner_contract_server_and_client_paths(tmp_path):
     client, _app = build_client(tmp_path)
 
@@ -800,6 +818,110 @@ def test_experiment_assignment_policy_stays_near_5050(tmp_path):
     b_ratio = b_count / total
     assert 0.45 <= a_ratio <= 0.55
     assert 0.45 <= b_ratio <= 0.55
+
+
+def test_recommendation_telemetry_event_writes_impression_and_click(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    impression = authed_post(
+        client,
+        "/api/analytics/recommendation-event",
+        json={
+            "event_type": "rec_impression",
+            "widget_key": "suggested-times",
+            "variant_label": "Version A",
+        },
+    )
+    assert impression.status_code == 201
+
+    click = authed_post(
+        client,
+        "/api/analytics/recommendation-event",
+        json={
+            "event_type": "rec_click",
+            "widget_key": "suggested-times",
+            "variant_label": "Version A",
+        },
+    )
+    assert click.status_code == 201
+
+    with app.app_context():
+        rows = app.get_db().execute(
+            "SELECT event_type,widget_key,variant FROM analytics_events WHERE user_id=2 AND event_type IN ('rec_impression','rec_click') ORDER BY id"
+        ).fetchall()
+        assert len(rows) >= 2
+        assert rows[-2]["event_type"] == "rec_impression"
+        assert rows[-2]["widget_key"] == "suggested-times"
+        assert rows[-2]["variant"] == "Version A"
+        assert rows[-1]["event_type"] == "rec_click"
+
+
+def test_recommendation_telemetry_event_rejects_malformed_payload(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_supervisor(client)
+
+    bad_event_type = authed_post(
+        client,
+        "/api/analytics/recommendation-event",
+        json={
+            "event_type": "rec_open",
+            "widget_key": "suggested-times",
+            "variant_label": "Version A",
+        },
+    )
+    assert bad_event_type.status_code == 400
+
+    bad_widget = authed_post(
+        client,
+        "/api/analytics/recommendation-event",
+        json={
+            "event_type": "rec_impression",
+            "widget_key": "unknown-widget",
+            "variant_label": "Version A",
+        },
+    )
+    assert bad_widget.status_code == 400
+
+    bad_label = authed_post(
+        client,
+        "/api/analytics/recommendation-event",
+        json={
+            "event_type": "rec_click",
+            "widget_key": "suggested-times",
+            "variant_label": "Unknown Label",
+        },
+    )
+    assert bad_label.status_code == 400
+
+
+def test_recommendation_telemetry_auth_and_rate_limit(tmp_path):
+    client, _app = build_client(tmp_path)
+
+    unauth = client.post(
+        "/api/analytics/recommendation-event",
+        json={
+            "event_type": "rec_impression",
+            "widget_key": "suggested-times",
+            "variant_label": "Version A",
+        },
+    )
+    assert unauth.status_code == 302
+
+    login_supervisor(client)
+    limited = None
+    for _ in range(41):
+        limited = authed_post(
+            client,
+            "/api/analytics/recommendation-event",
+            json={
+                "event_type": "rec_click",
+                "widget_key": "suggested-times",
+                "variant_label": "Version A",
+            },
+        )
+    assert limited is not None
+    assert limited.status_code == 429
 
 
 def test_anomaly_notes_features_social_and_masking(tmp_path):

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import secrets
 from datetime import timedelta
 
@@ -25,6 +26,45 @@ def register_collab_routes(app, ctx):
         if payload is None:
             return None, (jsonify({"error": "Invalid JSON payload"}), 400)
         return payload, None
+
+    def recommendation_event_rate_limited(user_id, event_type, max_per_minute=40):
+        now = utc_now()
+        bucket = now.strftime("%Y-%m-%dT%H:%M")
+        previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
+        actor_key = f"rec_user:{user_id}"
+        action = f"recommendation_{event_type}"
+        db = get_db()
+
+        row = db.execute(
+            "SELECT attempt_count FROM abuse_attempts WHERE actor_key=? AND action=? AND minute_bucket=?",
+            (actor_key, action, bucket),
+        ).fetchone()
+        count = (row["attempt_count"] if row else 0) + 1
+        if row:
+            db.execute(
+                "UPDATE abuse_attempts SET attempt_count=? WHERE actor_key=? AND action=? AND minute_bucket=?",
+                (count, actor_key, action, bucket),
+            )
+        else:
+            db.execute(
+                "INSERT INTO abuse_attempts (actor_key,action,minute_bucket,attempt_count) VALUES (?,?,?,?)",
+                (actor_key, action, bucket, count),
+            )
+
+        rolling = db.execute(
+            "SELECT COALESCE(SUM(attempt_count),0) FROM abuse_attempts WHERE actor_key=? AND action=? AND minute_bucket IN (?,?)",
+            (actor_key, action, bucket, previous_bucket),
+        ).fetchone()[0]
+        db.commit()
+        if rolling > max_per_minute:
+            app.logger.warning(
+                "recommendation_event_rate_limited user_id=%s event_type=%s count_60s=%s",
+                user_id,
+                event_type,
+                rolling,
+            )
+            return True
+        return False
 
     @app.get("/notes")
     @login_required
@@ -360,6 +400,50 @@ def register_collab_routes(app, ctx):
             variant = assignment["variant"]
         label = exp["label_a"] if variant == "A" else exp["label_b"]
         return jsonify({"variant": variant, "label": label, "enabled": True})
+
+    @app.post("/api/analytics/recommendation-event")
+    @login_required
+    def recommendation_event():
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+
+        event_type = (payload.get("event_type") or "").strip()
+        widget_key = (payload.get("widget_key") or "").strip()
+        variant_label = (payload.get("variant_label") or "").strip()
+        if event_type not in {"rec_impression", "rec_click"}:
+            return jsonify({"error": "event_type must be rec_impression or rec_click"}), 400
+        if not widget_key or len(widget_key) > 64:
+            return jsonify({"error": "widget_key is required and must be <= 64 chars"}), 400
+        if not variant_label or len(variant_label) > 64:
+            return jsonify({"error": "variant_label is required and must be <= 64 chars"}), 400
+
+        db = get_db()
+        exp = db.execute("SELECT label_a,label_b FROM experiments WHERE widget_key=?", (widget_key,)).fetchone()
+        if not exp:
+            return jsonify({"error": "Unknown widget_key"}), 400
+        if variant_label not in {exp["label_a"], exp["label_b"]}:
+            return jsonify({"error": "variant_label does not match configured experiment labels"}), 400
+
+        user_id = session.get("user_id")
+        if not user_id:
+            abort(401)
+        if recommendation_event_rate_limited(user_id, event_type):
+            return jsonify({"error": "Recommendation telemetry rate limit exceeded", "retry_after_seconds": 60}), 429
+
+        db.execute(
+            "INSERT INTO analytics_events (user_id,event_type,widget_key,variant,created_at,metadata) VALUES (?,?,?,?,?,?)",
+            (
+                user_id,
+                event_type,
+                widget_key,
+                variant_label,
+                to_iso(utc_now()),
+                json.dumps({"source": "widget_client"}),
+            ),
+        )
+        db.commit()
+        return jsonify({"ok": True}), 201
 
     @app.get("/supervisor/experiments")
     @login_required
