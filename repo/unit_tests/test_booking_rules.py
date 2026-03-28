@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 def build_client(tmp_path):
     os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_test.db")
     os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_test.key")
+    os.environ["METROOPS_RUNTIME_ENV"] = "test"
     os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
     module = importlib.import_module("app.app")
     module = importlib.reload(module)

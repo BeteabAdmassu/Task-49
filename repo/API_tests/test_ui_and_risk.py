@@ -4,10 +4,13 @@ import os
 from io import BytesIO
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 
 def build_client(tmp_path):
     os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_api.db")
     os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_api.key")
+    os.environ["METROOPS_RUNTIME_ENV"] = "test"
     os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
     module = importlib.import_module("app.app")
     module = importlib.reload(module)
@@ -176,6 +179,29 @@ def test_dashboard_contains_htmx_seat_refresh(tmp_path):
     assert b"screen=dashboard-seat-availability" in page.data
 
 
+def test_offline_banner_contract_server_and_client_paths(tmp_path):
+    client, _app = build_client(tmp_path)
+
+    kiosk = client.get("/kiosk")
+    assert kiosk.status_code == 200
+    assert b'id="offline-banner"' in kiosk.data
+    assert b"Offline" in kiosk.data
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    body = js.get_data(as_text=True)
+    assert "fetch(`/api/heartbeat?screen=${encodeURIComponent(screenName)}`" in body
+    assert 'document.body.addEventListener("htmx:responseError"' in body
+    assert 'document.body.addEventListener("htmx:sendError"' in body
+    assert 'offlineBanner.classList.toggle("hidden", !isOffline);' in body
+
+    heartbeat = client.get("/api/heartbeat?screen=offline-contract")
+    assert heartbeat.status_code == 200
+    payload = heartbeat.get_json()
+    assert payload["ok"] is True
+    assert "time" in payload
+
+
 def test_depot_mutation_requires_permission(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
@@ -275,6 +301,68 @@ def test_depot_hierarchy_management_crud_and_validation(tmp_path):
     manage_page = client.get("/depot/manage")
     assert manage_page.status_code == 200
     assert b"Depot Hierarchy Manager" in manage_page.data
+
+
+def test_depot_manage_ui_contains_operator_workflow_controls(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_supervisor(client)
+
+    page = client.get("/depot/manage")
+    assert page.status_code == 200
+    assert b"Freeze or Unfreeze Bin" in page.data
+    assert b"Allocate Inventory" in page.data
+    assert b"/api/depot/bins/" in page.data
+    assert b"/api/security/nonce" in page.data
+    assert b"inventory_adjust" in page.data
+    assert b"/api/depot/allocate" in page.data
+
+
+def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    invalid_freeze = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "bad"})
+    assert invalid_freeze.status_code == 422
+
+    frozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
+    assert frozen.status_code == 200
+
+    nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    blocked_allocate = authed_post(
+        client,
+        "/api/depot/allocate",
+        json={
+            "request_nonce": nonce,
+            "bin_id": 1,
+            "item_name": "BlockedCrate",
+            "volume_cuft": 1,
+            "weight_lb": 1,
+        },
+    )
+    assert blocked_allocate.status_code == 409
+
+    unfrozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0"})
+    assert unfrozen.status_code == 200
+
+    nonce_ok = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    allocated = authed_post(
+        client,
+        "/api/depot/allocate",
+        json={
+            "request_nonce": nonce_ok,
+            "bin_id": 1,
+            "item_name": "WorkflowCrate",
+            "volume_cuft": 1,
+            "weight_lb": 1,
+        },
+    )
+    assert allocated.status_code == 200
+
+    with app.app_context():
+        found = app.get_db().execute(
+            "SELECT COUNT(*) FROM inventory_items WHERE bin_id=1 AND item_name='WorkflowCrate'"
+        ).fetchone()[0]
+        assert found >= 1
 
 
 def test_note_object_level_authorization(tmp_path):
@@ -442,6 +530,7 @@ def test_session_cookie_security_flags_present_on_login(tmp_path):
 def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_tls.db")
     os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_tls.key")
+    os.environ["METROOPS_RUNTIME_ENV"] = "production"
     os.environ["DISABLE_TLS_ENFORCEMENT"] = "0"
     module = importlib.import_module("app.app")
     module = importlib.reload(module)
@@ -495,6 +584,63 @@ def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     assert metrics.status_code == 200
     assert b"CTR" in metrics.data
     assert b"1.0" in metrics.data
+
+
+def test_production_runtime_rejects_tls_disable_startup(tmp_path):
+    previous = {
+        "METROOPS_RUNTIME_ENV": os.environ.get("METROOPS_RUNTIME_ENV"),
+        "DISABLE_TLS_ENFORCEMENT": os.environ.get("DISABLE_TLS_ENFORCEMENT"),
+        "METROOPS_DB_PATH": os.environ.get("METROOPS_DB_PATH"),
+        "METROOPS_KEY_PATH": os.environ.get("METROOPS_KEY_PATH"),
+    }
+    try:
+        os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_tls_policy_prod.db")
+        os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_tls_policy_prod.key")
+        os.environ["METROOPS_RUNTIME_ENV"] = "production"
+        os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
+
+        module = importlib.import_module("app.app")
+        with pytest.raises(RuntimeError, match="allowed only in development/test/local"):
+            importlib.reload(module)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_development_runtime_allows_tls_disable_with_warning(tmp_path, caplog):
+    previous = {
+        "METROOPS_RUNTIME_ENV": os.environ.get("METROOPS_RUNTIME_ENV"),
+        "DISABLE_TLS_ENFORCEMENT": os.environ.get("DISABLE_TLS_ENFORCEMENT"),
+        "METROOPS_DB_PATH": os.environ.get("METROOPS_DB_PATH"),
+        "METROOPS_KEY_PATH": os.environ.get("METROOPS_KEY_PATH"),
+    }
+    try:
+        os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_tls_policy_dev.db")
+        os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_tls_policy_dev.key")
+        os.environ["METROOPS_RUNTIME_ENV"] = "development"
+        os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
+
+        caplog.set_level(logging.WARNING)
+        module = importlib.import_module("app.app")
+        module = importlib.reload(module)
+        app = module.create_app()
+        app.testing = False
+        app.init_db()
+        client = app.test_client()
+
+        response = client.get("/login")
+        assert response.status_code == 200
+        logs = "\n".join(record.getMessage() for record in caplog.records)
+        assert "TLS enforcement disabled" in logs
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_experiment_assignment_population_near_5050(tmp_path):
@@ -555,7 +701,7 @@ def test_experiment_control_update_requires_permission_and_writes_audit(tmp_path
             "enabled": "0",
             "label_a": "Pilot A",
             "label_b": "Pilot B",
-            "split_a_percent": "80",
+            "split_a_percent": "50",
         },
         follow_redirects=False,
     )
@@ -567,14 +713,46 @@ def test_experiment_control_update_requires_permission_and_writes_audit(tmp_path
         assert exp["enabled"] == 0
         assert exp["label_a"] == "Pilot A"
         assert exp["label_b"] == "Pilot B"
-        assert exp["split_a_percent"] == 80
+        assert exp["split_a_percent"] == 50
         audit = db.execute(
             "SELECT COUNT(*) FROM experiment_audit_log WHERE experiment_id=1 AND changed_by=2"
         ).fetchone()[0]
         assert audit >= 1
 
 
-def test_experiment_assignment_respects_configured_split_policy(tmp_path):
+def test_experiment_rejects_non_50_split_policy_update(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    rejected = authed_post(
+        client,
+        "/supervisor/experiments/1",
+        data={
+            "enabled": "1",
+            "label_a": "Version A",
+            "label_b": "Version B",
+            "split_a_percent": "80",
+        },
+    )
+    assert rejected.status_code == 422
+    assert "fixed policy" in rejected.get_json()["error"]
+
+    with app.app_context():
+        split = app.get_db().execute("SELECT split_a_percent FROM experiments WHERE id=1").fetchone()[0]
+        assert split == 50
+
+
+def test_experiment_ui_shows_fixed_split_policy(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_supervisor(client)
+
+    page = client.get("/supervisor/experiments")
+    assert page.status_code == 200
+    assert b"50% / B: 50% (fixed by policy)" in page.data
+    assert b"name=\"split_a_percent\"" not in page.data
+
+
+def test_experiment_assignment_policy_stays_near_5050(tmp_path):
     client, app = build_client(tmp_path)
     login_supervisor(client)
 
@@ -585,7 +763,7 @@ def test_experiment_assignment_respects_configured_split_policy(tmp_path):
             "enabled": "1",
             "label_a": "Version A",
             "label_b": "Version B",
-            "split_a_percent": "80",
+            "split_a_percent": "50",
         },
     )
     assert updated.status_code == 302
@@ -620,8 +798,8 @@ def test_experiment_assignment_respects_configured_split_policy(tmp_path):
     total = a_count + b_count
     a_ratio = a_count / total
     b_ratio = b_count / total
-    assert 0.75 <= a_ratio <= 0.85
-    assert 0.15 <= b_ratio <= 0.25
+    assert 0.45 <= a_ratio <= 0.55
+    assert 0.45 <= b_ratio <= 0.55
 
 
 def test_anomaly_notes_features_social_and_masking(tmp_path):
@@ -801,6 +979,30 @@ def test_lan_gateway_ingestion_and_csrf_protection(tmp_path):
         ).fetchone()
         assert row is not None
         assert row["source"] == "lan_gateway"
+
+
+def test_placeholder_gateway_token_disables_lan_ingestion(tmp_path, caplog):
+    previous_token = os.environ.get("METROOPS_GATEWAY_TOKEN")
+    os.environ["METROOPS_GATEWAY_TOKEN"] = "replace-me-for-production"
+    try:
+        caplog.set_level(logging.WARNING)
+        client, _app = build_client(tmp_path)
+
+        blocked = client.post(
+            "/api/vehicle-pings/gateway",
+            json={"pings": []},
+            headers={"X-Gateway-Token": "replace-me-for-production"},
+        )
+        assert blocked.status_code == 503
+        assert "disabled" in blocked.get_json()["error"].lower()
+
+        logs = "\n".join(record.getMessage() for record in caplog.records)
+        assert "placeholder-like value" in logs
+    finally:
+        if previous_token is None:
+            os.environ.pop("METROOPS_GATEWAY_TOKEN", None)
+        else:
+            os.environ["METROOPS_GATEWAY_TOKEN"] = previous_token
 
 
 def test_kiosk_nonce_throttling_and_risk_event(tmp_path):

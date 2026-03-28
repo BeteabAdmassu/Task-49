@@ -25,6 +25,7 @@ def run_server(app, host="127.0.0.1", port=5015):
 def build_app(tmp_path):
     os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_browser.db")
     os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_browser.key")
+    os.environ["METROOPS_RUNTIME_ENV"] = "test"
     os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
     module = importlib.import_module("app.app")
     module = importlib.reload(module)

@@ -77,6 +77,34 @@
   </div>
 </section>
 
+<section class="grid">
+  <article class="panel">
+    <h3>Freeze or Unfreeze Bin</h3>
+    <div class="stack">
+      <label>Bin ID <input id="freeze-bin-id" type="number" min="1"></label>
+      <label>Frozen State
+        <select id="freeze-state">
+          <option value="1">Frozen</option>
+          <option value="0">Unfrozen</option>
+        </select>
+      </label>
+      <button onclick="setBinFrozenState()">Apply Freeze State</button>
+    </div>
+  </article>
+
+  <article class="panel">
+    <h3>Allocate Inventory</h3>
+    <p class="hint">This action requests an inventory nonce before allocation.</p>
+    <div class="stack">
+      <label>Bin ID <input id="allocate-bin-id" type="number" min="1"></label>
+      <label>Item Name <input id="allocate-item-name" value="Asset"></label>
+      <label>Volume (cuft) <input id="allocate-volume-cuft" type="number" min="0.1" step="0.1"></label>
+      <label>Weight (lb) <input id="allocate-weight-lb" type="number" min="0.1" step="0.1"></label>
+      <button onclick="allocateInventory()">Allocate Item</button>
+    </div>
+  </article>
+</section>
+
 <section class="panel">
   <h3>Warehouses</h3>
   <div id="warehouses-table"></div>
@@ -174,6 +202,61 @@
     });
     const data = await res.json();
     setDepotStatus(res.ok ? "Bin metadata updated" : (data.error || "Update failed"));
+    if (res.ok) loadHierarchy();
+  }
+
+  async function setBinFrozenState() {
+    const binId = Number(document.getElementById("freeze-bin-id").value);
+    const frozen = document.getElementById("freeze-state").value;
+    if (!binId) {
+      setDepotStatus("Bin ID is required.");
+      return;
+    }
+    const body = new URLSearchParams({ frozen });
+    const res = await fetch(`/api/depot/bins/${binId}/freeze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    const data = await res.json();
+    setDepotStatus(res.ok ? `Bin ${binId} ${data.frozen ? "frozen" : "unfrozen"}.` : (data.error || "Freeze update failed"));
+    if (res.ok) loadHierarchy();
+  }
+
+  async function allocateInventory() {
+    const binId = Number(document.getElementById("allocate-bin-id").value);
+    const itemName = (document.getElementById("allocate-item-name").value || "Asset").trim();
+    const volume = Number(document.getElementById("allocate-volume-cuft").value);
+    const weight = Number(document.getElementById("allocate-weight-lb").value);
+    if (!binId || !volume || !weight) {
+      setDepotStatus("Bin ID, volume, and weight are required.");
+      return;
+    }
+
+    const nonceRes = await fetch("/api/security/nonce", {
+      method: "POST",
+      body: new URLSearchParams({ action: "inventory_adjust" }),
+    });
+    const noncePayload = await nonceRes.json();
+    if (!nonceRes.ok || !noncePayload.nonce) {
+      setDepotStatus(noncePayload.error || "Failed to obtain inventory nonce.");
+      return;
+    }
+
+    const payload = {
+      request_nonce: noncePayload.nonce,
+      bin_id: binId,
+      item_name: itemName || "Asset",
+      volume_cuft: volume,
+      weight_lb: weight,
+    };
+    const res = await fetch("/api/depot/allocate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setDepotStatus(res.ok ? `Allocated ${payload.item_name} to bin ${binId}.` : (data.error || "Allocation failed"));
     if (res.ok) loadHierarchy();
   }
 

@@ -6,6 +6,14 @@ Offline-first Flask + HTMX portal for reservations, service visibility, depot lo
 
 From the project root (the folder that contains `docker-compose.yml`), start everything with:
 
+1. Set a strong gateway token in your shell (required by compose, do not use placeholder values):
+
+```bash
+set METROOPS_GATEWAY_TOKEN=use-a-long-random-token
+```
+
+2. Start all services:
+
 ```bash
 docker compose up
 ```
@@ -43,6 +51,16 @@ python -m pip install -r requirements.txt
 python -m app.app
 ```
 
+If you need to run local HTTP (non-TLS) for development-only testing, explicitly set development runtime mode before disabling TLS enforcement:
+
+```bash
+set METROOPS_RUNTIME_ENV=development
+set DISABLE_TLS_ENFORCEMENT=1
+python -m app.app
+```
+
+In production-like runtime modes (`production`, default when unset), `DISABLE_TLS_ENFORCEMENT=1` is rejected at startup.
+
 Enable debug mode only when needed:
 
 ```bash
@@ -68,7 +86,7 @@ set FLASK_DEBUG=1
 - Nonce enforcement is user-bound, action-bound, one-time-use, and expiry-checked.
 - Kiosk abuse throttling on unauthenticated endpoints with 429 + retry hints and risk-event logging.
 - Vehicle ping CSV ingest is permission-gated with `ops:ingest` (supervisor/admin by default).
-- TLS enforcement (set `DISABLE_TLS_ENFORCEMENT=1` for local tests only).
+- TLS enforcement is mandatory in production-like mode; disabling is allowed only in explicit `development`/`test`/`local` runtime modes with warning logs.
 - Risk events: impossible speed jumps and excessive refresh attempts.
 - Notes are depot-scoped for non-HR/non-admin users.
 
@@ -85,7 +103,7 @@ Set a non-default gateway token in your environment before enabling LAN ingest:
 set METROOPS_GATEWAY_TOKEN=your-strong-local-token
 ```
 
-If `METROOPS_GATEWAY_TOKEN` is not configured, startup logs a warning and LAN gateway ingestion stays disabled.
+If `METROOPS_GATEWAY_TOKEN` is missing or placeholder-like (for example `replace-me-for-production`), startup logs a warning and LAN gateway ingestion stays disabled.
 - HTMX is vendored locally in `app/static/vendor/htmx.min.js` for offline operation.
 
 ## New Operational Surfaces
@@ -114,12 +132,32 @@ Booking rules are DB-backed and audit-logged (`config_audit_log`) with safe defa
 1. Login as `supervisor01` and open `/dashboard`.
 2. Confirm seat availability auto-refreshes every 10s after selecting departure.
 3. Open `/depot/manage`, create warehouse/zone/bin, then update bin type/status.
-4. Open `/notes`, confirm Cross-Task Rollups section loads from `/api/notes/rollup`.
+4. In `/depot/manage`, use **Freeze or Unfreeze Bin** for bin `1`, then run **Allocate Inventory** for the same bin and confirm status messages appear and tables refresh.
+5. Confirm allocation fails when bin is frozen and succeeds after unfreezing.
+6. Open `/notes`, confirm Cross-Task Rollups section loads from `/api/notes/rollup`.
+
+## Non-Docker Verification for New Depot Controls
+
+1. Start the app locally with `python -m app.app`.
+2. Login as `supervisor01` and open `https://localhost:5000/depot/manage`.
+3. Set Bin ID `1` to frozen in **Freeze or Unfreeze Bin**, then try **Allocate Inventory** with small values (expect an error because the bin is frozen).
+4. Set Bin ID `1` to unfrozen and retry allocation (expect success).
+5. Click **Refresh Hierarchy** and confirm `current_cuft`/`current_lb` increased for that bin.
 
 ## Optional Browser Integration Test
 
 Offline banner browser test is in `API_tests/test_browser_offline_banner.py`.
-It runs when Playwright is installed (`pip install playwright` and browser install step) and is skipped otherwise.
+It runs when Playwright is installed and is skipped otherwise.
+
+Playwright setup (optional):
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+python -m pytest API_tests/test_browser_offline_banner.py -q
+```
+
+Non-browser offline signaling coverage is also included in `API_tests/test_ui_and_risk.py::test_offline_banner_contract_server_and_client_paths`, so CI/local verification does not rely only on Playwright.
 
 ## Verification (Acceptance-Focused)
 

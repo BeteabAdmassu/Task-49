@@ -81,22 +81,70 @@ def load_fernet():
     return Fernet(KEY_PATH.read_bytes())
 
 
+def validated_gateway_token(raw_value):
+    token = (raw_value or "").strip()
+    if not token:
+        return "", "not set"
+    lowered = token.lower()
+    placeholder_markers = (
+        "replace-me",
+        "changeme",
+        "change-me",
+        "placeholder",
+        "example",
+        "your-token",
+        "your-strong-local-token",
+        "set-me",
+    )
+    if any(marker in lowered for marker in placeholder_markers):
+        return "", "placeholder-like value"
+    return token, "configured"
+
+
+def runtime_env_mode():
+    raw_mode = (
+        os.environ.get("METROOPS_RUNTIME_ENV")
+        or os.environ.get("FLASK_ENV")
+        or os.environ.get("APP_ENV")
+        or "production"
+    )
+    mode = raw_mode.strip().lower()
+    development_modes = {"development", "dev", "local", "test", "testing"}
+    return mode, mode in development_modes
+
+
 def create_app():
     app = Flask(__name__, template_folder="templates", static_folder="static")
+    runtime_env, development_mode = runtime_env_mode()
+    tls_disable_requested = os.environ.get("DISABLE_TLS_ENFORCEMENT", "0") == "1"
+    if tls_disable_requested and not development_mode:
+        raise RuntimeError(
+            "DISABLE_TLS_ENFORCEMENT=1 is allowed only in development/test/local runtime modes"
+        )
     app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
+    app.config["RUNTIME_ENV"] = runtime_env
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=30)
     app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "1") == "1"
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
     app.config["TLS_REQUIRED"] = True
-    app.config["DISABLE_TLS_ENFORCEMENT"] = os.environ.get("DISABLE_TLS_ENFORCEMENT", "0") == "1"
-    app.config["GATEWAY_TOKEN"] = os.environ.get("METROOPS_GATEWAY_TOKEN")
+    app.config["DISABLE_TLS_ENFORCEMENT"] = tls_disable_requested and development_mode
+    gateway_token, gateway_token_state = validated_gateway_token(os.environ.get("METROOPS_GATEWAY_TOKEN"))
+    app.config["GATEWAY_TOKEN"] = gateway_token
     app.config["CSRF_PROTECT"] = True
     app.fernet = load_fernet()
 
     if not app.config["GATEWAY_TOKEN"]:
-        app.logger.warning("METROOPS_GATEWAY_TOKEN is not set; LAN gateway ingestion endpoint is disabled")
+        app.logger.warning(
+            "METROOPS_GATEWAY_TOKEN is %s; LAN gateway ingestion endpoint is disabled",
+            gateway_token_state,
+        )
+    if app.config["DISABLE_TLS_ENFORCEMENT"]:
+        app.logger.warning(
+            "TLS enforcement disabled for %s runtime; use this only for local development/testing",
+            runtime_env,
+        )
 
     def get_db():
         if "db" not in g:

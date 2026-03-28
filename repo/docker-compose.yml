@@ -1,7 +1,7 @@
 services:
   metroops:
     build:
-      context: ./repo
+      context: .
       dockerfile: Dockerfile
     container_name: metroops
     ports:
@@ -13,7 +13,7 @@ services:
       SESSION_COOKIE_SAMESITE: "Lax"
       METROOPS_DB_PATH: "/app/data/metroops.db"
       METROOPS_KEY_PATH: "/app/data/secret.key"
-      METROOPS_GATEWAY_TOKEN: "replace-me-for-production"
+      METROOPS_GATEWAY_TOKEN: ${METROOPS_GATEWAY_TOKEN?Set METROOPS_GATEWAY_TOKEN in host env or a local .env file}
     volumes:
       - metroops_data:/app/data
     healthcheck:

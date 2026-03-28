@@ -333,10 +333,10 @@ def register_collab_routes(app, ctx):
             )
         return render_template("profile.html", owner=owner, mutual=mutual, masked_face=masked_face)
 
-    def assign_variant(user_id, experiment_id, split_a_percent):
+    def assign_variant(user_id, experiment_id):
         hash_key = hashlib.sha256(f"{user_id}:{experiment_id}".encode("utf-8")).hexdigest()
         bucket = int(hash_key[:8], 16) % 100
-        return "A" if bucket < split_a_percent else "B"
+        return "A" if bucket < 50 else "B"
 
     @app.get("/api/experiments/assign/<widget_key>")
     @login_required
@@ -350,7 +350,7 @@ def register_collab_routes(app, ctx):
             (exp["id"], session["user_id"]),
         ).fetchone()
         if not assignment:
-            variant = assign_variant(session["user_id"], exp["id"], exp["split_a_percent"])
+            variant = assign_variant(session["user_id"], exp["id"])
             db.execute(
                 "INSERT INTO experiment_assignments (experiment_id,user_id,variant,created_at) VALUES (?,?,?,?)",
                 (exp["id"], session["user_id"], variant, to_iso(utc_now())),
@@ -403,12 +403,17 @@ def register_collab_routes(app, ctx):
         if not label_a or not label_b:
             return jsonify({"error": "Both labels are required"}), 422
 
-        try:
-            split_a_percent = int(request.form.get("split_a_percent", "50"))
-        except ValueError:
-            return jsonify({"error": "split_a_percent must be an integer"}), 422
-        if split_a_percent < 0 or split_a_percent > 100:
-            return jsonify({"error": "split_a_percent must be between 0 and 100"}), 422
+        split_raw = request.form.get("split_a_percent")
+        if split_raw is None or split_raw.strip() == "":
+            split_a_percent = 50
+        else:
+            try:
+                split_a_percent = int(split_raw)
+            except ValueError:
+                return jsonify({"error": "split_a_percent must be an integer"}), 422
+        if split_a_percent != 50:
+            return jsonify({"error": "split_a_percent must be 50 (fixed policy)"}), 422
+        split_a_percent = 50
 
         updates = {
             "enabled": enabled,
