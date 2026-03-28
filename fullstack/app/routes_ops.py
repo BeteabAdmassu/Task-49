@@ -323,6 +323,7 @@ def register_ops_routes(app, ctx):
 
     @app.post("/api/vehicle-pings/upload")
     @login_required
+    @require_permission("ops:ingest")
     def upload_vehicle_pings():
         file = request.files.get("file")
         if not file:

@@ -139,12 +139,15 @@ def register_collab_routes(app, ctx):
         link_type = payload.get("link_type", "related")
         db = get_db()
         user = current_user()
-        left_note = db.execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (left,)).fetchone()
-        right_note = db.execute("SELECT owner_id,depot_scope FROM notes WHERE id=?", (right,)).fetchone()
+        left_note = db.execute("SELECT owner_id,depot_scope,note_type FROM notes WHERE id=?", (left,)).fetchone()
+        right_note = db.execute("SELECT owner_id,depot_scope,note_type FROM notes WHERE id=?", (right,)).fetchone()
         if not left_note or not right_note:
             return jsonify({"error": "Note not found"}), 404
         if not can_edit_note(user, left_note) or not can_edit_note(user, right_note):
             return jsonify({"error": "Forbidden"}), 403
+        pair = {left_note["note_type"], right_note["note_type"]}
+        if pair != {"incident", "training"}:
+            return jsonify({"error": "Links must be between one incident and one training note"}), 422
         db.execute(
             "INSERT OR IGNORE INTO note_links (from_note_id,to_note_id,link_type) VALUES (?,?,?)",
             (left, right, link_type),

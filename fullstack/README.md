@@ -40,6 +40,7 @@ set FLASK_DEBUG=1
 - Nonce validation for booking confirmation and inventory adjustments.
 - Nonce enforcement is user-bound, action-bound, one-time-use, and expiry-checked.
 - Kiosk abuse throttling on unauthenticated endpoints with 429 + retry hints and risk-event logging.
+- Vehicle ping CSV ingest is permission-gated with `ops:ingest` (supervisor/admin by default).
 - TLS enforcement (set `DISABLE_TLS_ENFORCEMENT=1` for local tests only).
 - Risk events: impossible speed jumps and excessive refresh attempts.
 - Notes are depot-scoped for non-HR/non-admin users.
@@ -105,6 +106,29 @@ python -m pytest unit_tests API_tests
   - cross-action nonce misuse rejection
   - kiosk abuse throttle + risk-event logging
   - experiment variant distribution near 50/50 at scale
+
+## Local Data Cleanup (Non-Production)
+
+Use this only for local verification resets.
+
+1. Remove local DB and key (they are recreated on next run):
+
+```bash
+del data\metroops.db
+del data\secret.key
+```
+
+2. Clear uploaded attachments but keep the placeholder file:
+
+```bash
+for %f in (data\attachments\*) do @if /I not "%~nxf"==".keep" del "%f"
+```
+
+3. Restart app to re-seed baseline data:
+
+```bash
+python -m app.app
+```
 
 ## Maintainability Updates
 

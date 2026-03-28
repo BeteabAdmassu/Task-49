@@ -425,6 +425,20 @@ def test_admin_user_create_enforces_password_policy(tmp_path):
     assert duplicate.status_code == 409
 
 
+def test_session_cookie_security_flags_present_on_login(tmp_path):
+    client, _app = build_client(tmp_path)
+    response = client.post(
+        "/login",
+        data={"username": "agent01", "password": "MetroOpsPass!01"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    cookie = response.headers.get("Set-Cookie", "")
+    assert "Secure" in cookie
+    assert "HttpOnly" in cookie
+    assert "SameSite=Lax" in cookie
+
+
 def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_tls.db")
     os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_tls.key")
@@ -524,7 +538,7 @@ def test_experiment_assignment_population_near_5050(tmp_path):
 
 def test_anomaly_notes_features_social_and_masking(tmp_path):
     client, app = build_client(tmp_path)
-    login_agent(client)
+    login_supervisor(client)
 
     csv_data = "vehicle_id,route_id,stop_sequence,speed_mph,ping_time,lat,lon\nV1,1,1,10,2026-01-01T00:00:00+00:00,0,0\nV1,1,1,100,2026-01-01T00:01:00+00:00,0,0\n"
     upload = authed_post(
@@ -581,6 +595,8 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
     )
     assert attach.status_code == 200
 
+    login_agent(client)
+
     follow = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
     assert follow.status_code == 200
     block = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "block"})
@@ -616,9 +632,32 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
     assert b"***" in profile.data
 
 
+def test_vehicle_ping_ingest_requires_ops_permission(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    csv_data = "vehicle_id,route_id,stop_sequence,speed_mph,ping_time,lat,lon\nV1,1,1,10,2026-01-01T00:00:00+00:00,0,0\n"
+    denied = authed_post(
+        client,
+        "/api/vehicle-pings/upload",
+        data={"file": (BytesIO(csv_data.encode("utf-8")), "pings.csv")},
+        content_type="multipart/form-data",
+    )
+    assert denied.status_code == 403
+
+    login_supervisor(client)
+    allowed = authed_post(
+        client,
+        "/api/vehicle-pings/upload",
+        data={"file": (BytesIO(csv_data.encode("utf-8")), "pings.csv")},
+        content_type="multipart/form-data",
+    )
+    assert allowed.status_code == 200
+
+
 def test_geospatial_implied_speed_anomaly_detection(tmp_path):
     client, app = build_client(tmp_path)
-    login_agent(client)
+    login_supervisor(client)
 
     csv_data = (
         "vehicle_id,route_id,stop_sequence,speed_mph,ping_time,lat,lon\n"
@@ -752,6 +791,23 @@ def test_malformed_payloads_return_4xx_not_500(tmp_path):
         json={"request_nonce": nonce, "bin_id": "bad", "volume_cuft": "x", "weight_lb": "y"},
     )
     assert bad_allocate.status_code == 422
+
+
+def test_note_link_semantics_require_incident_training_pairs(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    t1 = authed_post(client, "/api/notes", json={"title": "T1", "content_md": "x", "note_type": "training"}).get_json()["id"]
+    t2 = authed_post(client, "/api/notes", json={"title": "T2", "content_md": "x", "note_type": "training"}).get_json()["id"]
+    i1 = authed_post(client, "/api/notes", json={"title": "I1", "content_md": "x", "note_type": "incident"}).get_json()["id"]
+    i2 = authed_post(client, "/api/notes", json={"title": "I2", "content_md": "x", "note_type": "incident"}).get_json()["id"]
+
+    tt = authed_post(client, "/api/notes/link", json={"from_note_id": t1, "to_note_id": t2, "link_type": "related"})
+    assert tt.status_code == 422
+    ii = authed_post(client, "/api/notes/link", json={"from_note_id": i1, "to_note_id": i2, "link_type": "related"})
+    assert ii.status_code == 422
+    ti = authed_post(client, "/api/notes/link", json={"from_note_id": t1, "to_note_id": i1, "link_type": "related"})
+    assert ti.status_code == 200
 
 
 def test_nonce_cross_action_misuse_rejected(tmp_path):

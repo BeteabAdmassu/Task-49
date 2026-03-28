@@ -86,6 +86,9 @@ def create_app():
     app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=30)
+    app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "1") == "1"
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
     app.config["TLS_REQUIRED"] = True
     app.config["DISABLE_TLS_ENFORCEMENT"] = os.environ.get("DISABLE_TLS_ENFORCEMENT", "0") == "1"
     app.config["GATEWAY_TOKEN"] = os.environ.get("METROOPS_GATEWAY_TOKEN")
