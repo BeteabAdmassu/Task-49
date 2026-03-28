@@ -275,12 +275,32 @@ def create_app():
         ).fetchone()[0]
         return max(0, departure["total_seats"] - held - booked)
 
-    def enforce_booking_window(departure_time):
+    def get_int_config(db, key, default_value, min_value=1, max_value=3650):
+        row = db.execute("SELECT value FROM system_config WHERE key=?", (key,)).fetchone()
+        raw = row["value"] if row else str(default_value)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default_value
+        return max(min_value, min(max_value, value))
+
+    def booking_rule_values(db):
+        return {
+            "booking_min_advance_hours": get_int_config(db, "booking_min_advance_hours", 2, 1, 168),
+            "booking_max_horizon_days": get_int_config(db, "booking_max_horizon_days", 30, 1, 365),
+            "commuter_bundle_min_days": get_int_config(db, "commuter_bundle_min_days", 3, 1, 30),
+            "seat_hold_timeout_minutes": get_int_config(db, "seat_hold_timeout_minutes", 8, 1, 120),
+        }
+
+    def enforce_booking_window(db, departure_time):
+        rules = booking_rule_values(db)
+        min_hours = rules["booking_min_advance_hours"]
+        max_days = rules["booking_max_horizon_days"]
         now = utc_now()
-        if departure_time < now + timedelta(hours=2):
-            return False, "Booking must be made at least 2 hours before departure"
-        if departure_time > now + timedelta(days=30):
-            return False, "Booking cannot be made more than 30 days in advance"
+        if departure_time < now + timedelta(hours=min_hours):
+            return False, f"Booking must be made at least {min_hours} hours before departure"
+        if departure_time > now + timedelta(days=max_days):
+            return False, f"Booking cannot be made more than {max_days} days in advance"
         return True, "ok"
 
     def price_for_departure(db, departure, seats):
@@ -311,14 +331,16 @@ def create_app():
                 db.rollback()
                 return None, {"error": "Invalid departure"}, 404
 
-            valid, message = enforce_booking_window(from_iso(departure["departure_time"]))
+            rules = booking_rule_values(db)
+            valid, message = enforce_booking_window(db, from_iso(departure["departure_time"]))
             if not valid:
                 db.rollback()
                 return None, {"error": message}, 422
 
-            if product_type == "commuter_bundle" and bundle_days < 3:
+            min_bundle_days = rules["commuter_bundle_min_days"]
+            if product_type == "commuter_bundle" and bundle_days < min_bundle_days:
                 db.rollback()
-                return None, {"error": "Commuter bundle requires minimum 3 days"}, 422
+                return None, {"error": f"Commuter bundle requires minimum {min_bundle_days} days"}, 422
 
             seats = available_seats(db, departure_id)
             if seats_requested <= 0 or seats_requested > seats:
@@ -333,7 +355,7 @@ def create_app():
                 return None, {"error": "Insufficient seats", "seats_remaining": seats}, 409
 
             hold_nonce = secrets.token_urlsafe(16)
-            expires_at = to_iso(utc_now() + timedelta(minutes=8))
+            expires_at = to_iso(utc_now() + timedelta(minutes=rules["seat_hold_timeout_minutes"]))
             db.execute(
                 "INSERT INTO seat_holds (departure_id,user_id,seats,expires_at,status,nonce,created_at) VALUES (?,?,?,?,?,?,?)",
                 (
@@ -606,6 +628,57 @@ def create_app():
         db.commit()
         return jsonify({"ok": True}), 201
 
+    @app.get("/api/config/booking-rules")
+    @login_required
+    @require_permission("config:manage")
+    def get_booking_rules_config():
+        return jsonify(booking_rule_values(get_db()))
+
+    @app.post("/api/config/booking-rules")
+    @login_required
+    @require_permission("config:manage")
+    def update_booking_rules_config():
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return jsonify({"error": "Invalid JSON payload"}), 400
+
+        allowed_keys = {
+            "booking_min_advance_hours": (1, 168),
+            "booking_max_horizon_days": (1, 365),
+            "commuter_bundle_min_days": (1, 30),
+            "seat_hold_timeout_minutes": (1, 120),
+        }
+
+        db = get_db()
+        now_iso = to_iso(utc_now())
+        changed = 0
+        for key, (min_v, max_v) in allowed_keys.items():
+            if key not in payload:
+                continue
+            try:
+                new_value = int(payload[key])
+            except (TypeError, ValueError):
+                return jsonify({"error": f"Invalid integer for {key}"}), 422
+            if new_value < min_v or new_value > max_v:
+                return jsonify({"error": f"{key} must be between {min_v} and {max_v}"}), 422
+
+            old_row = db.execute("SELECT value FROM system_config WHERE key=?", (key,)).fetchone()
+            old_value = old_row["value"] if old_row else None
+            db.execute(
+                "INSERT INTO system_config (key,value,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+                (key, str(new_value), now_iso, session["user_id"]),
+            )
+            db.execute(
+                "INSERT INTO config_audit_log (key,old_value,new_value,changed_by,changed_at,reason) VALUES (?,?,?,?,?,?)",
+                (key, old_value, str(new_value), session["user_id"], now_iso, "booking_rule_update"),
+            )
+            changed += 1
+
+        if changed == 0:
+            return jsonify({"error": "No supported config keys supplied"}), 422
+        db.commit()
+        return jsonify({"ok": True, "rules": booking_rule_values(db)})
+
     @app.get("/dashboard")
     @login_required
     def dashboard():
@@ -706,4 +779,5 @@ app.init_db()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True, ssl_context="adhoc")
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode, ssl_context="adhoc")

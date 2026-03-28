@@ -16,6 +16,12 @@ python -m pip install -r requirements.txt
 python -m app.app
 ```
 
+Enable debug mode only when needed:
+
+```bash
+set FLASK_DEBUG=1
+```
+
 3. Open `https://localhost:5000`.
 
 ## Seed Accounts
@@ -32,6 +38,8 @@ python -m app.app
 - Session inactivity timeout: 30 minutes.
 - CSRF protection enforced for session-authenticated mutating routes.
 - Nonce validation for booking confirmation and inventory adjustments.
+- Nonce enforcement is user-bound, action-bound, one-time-use, and expiry-checked.
+- Kiosk abuse throttling on unauthenticated endpoints with 429 + retry hints and risk-event logging.
 - TLS enforcement (set `DISABLE_TLS_ENFORCEMENT=1` for local tests only).
 - Risk events: impossible speed jumps and excessive refresh attempts.
 - Notes are depot-scoped for non-HR/non-admin users.
@@ -58,10 +66,20 @@ If `METROOPS_GATEWAY_TOKEN` is not configured, startup logs a warning and LAN ga
 - Depot hierarchy management page: `/depot/manage`
 - Depot hierarchy APIs:
   - `GET /api/depot/hierarchy`
+  - `GET /api/depot/bin-rules`
+  - `POST /api/depot/bin-rules`
   - `POST /api/depot/warehouses`
   - `POST /api/depot/zones`
   - `POST /api/depot/bins`
   - `POST /api/depot/bins/<id>/metadata`
+  - `GET /api/config/booking-rules`
+  - `POST /api/config/booking-rules`
+
+Booking rules are DB-backed and audit-logged (`config_audit_log`) with safe defaults:
+- min advance booking: 2h
+- max booking horizon: 30d
+- commuter bundle minimum: 3d
+- seat hold timeout: 8m
 
 ## Verification Steps
 
@@ -69,6 +87,24 @@ If `METROOPS_GATEWAY_TOKEN` is not configured, startup logs a warning and LAN ga
 2. Confirm seat availability auto-refreshes every 10s after selecting departure.
 3. Open `/depot/manage`, create warehouse/zone/bin, then update bin type/status.
 4. Open `/notes`, confirm Cross-Task Rollups section loads from `/api/notes/rollup`.
+
+## Optional Browser Integration Test
+
+Offline banner browser test is in `API_tests/test_browser_offline_banner.py`.
+It runs when Playwright is installed (`pip install playwright` and browser install step) and is skipped otherwise.
+
+## Verification (Acceptance-Focused)
+
+- Run all automated checks:
+
+```bash
+python -m pytest unit_tests API_tests
+```
+
+- Includes checks for:
+  - cross-action nonce misuse rejection
+  - kiosk abuse throttle + risk-event logging
+  - experiment variant distribution near 50/50 at scale
 
 ## Maintainability Updates
 

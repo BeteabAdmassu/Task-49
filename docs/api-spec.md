@@ -19,6 +19,8 @@
 | POST | `/api/depot/bins/<bin_id>/freeze` | Freeze/unfreeze bin | `frozen` | `{ ok,frozen }` |
 | POST | `/api/depot/allocate` | Capacity-checked inventory allocation | `bin_id,volume_cuft,weight_lb,request_nonce` | `{ ok }` |
 | GET | `/api/depot/hierarchy` | List warehouses/zones/bins | - | `{ warehouses,zones,bins }` |
+| GET | `/api/depot/bin-rules` | List active/inactive bin rule values | - | JSON list |
+| POST | `/api/depot/bin-rules` | Upsert bin type/status rule value | `rule_type,rule_value,is_active` | `{ ok }` |
 | POST | `/api/depot/warehouses` | Create warehouse | `name` | `{ ok,id }` |
 | POST | `/api/depot/zones` | Create zone under warehouse | `warehouse_id,name` | `{ ok,id }` |
 | POST | `/api/depot/bins` | Create bin with metadata | `zone_id,code,bin_type,status,capacity_*` | `{ ok,id }` |

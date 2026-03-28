@@ -1,6 +1,7 @@
 import csv
 import math
 import secrets
+import sqlite3
 from datetime import timedelta
 
 from flask import jsonify, render_template, request, session
@@ -21,8 +22,19 @@ def register_ops_routes(app, ctx):
     confirm_booking_for_user = ctx["confirm_booking_for_user"]
     ensure_kiosk_user_id = ctx["ensure_kiosk_user_id"]
     gateway_token = app.config.get("GATEWAY_TOKEN", "")
-    allowed_bin_types = {"standard", "cold", "hazmat", "secure"}
-    allowed_bin_statuses = {"available", "unavailable", "maintenance"}
+
+    def allowed_rule_values(db, rule_type):
+        rows = db.execute(
+            "SELECT rule_value FROM depot_bin_rules WHERE rule_type=? AND is_active=1",
+            (rule_type,),
+        ).fetchall()
+        values = {row["rule_value"] for row in rows}
+        if not values:
+            if rule_type == "bin_type":
+                return {"standard", "cold", "hazmat", "secure"}
+            if rule_type == "bin_status":
+                return {"available", "unavailable", "maintenance"}
+        return values
 
     def great_circle_miles(lat1, lon1, lat2, lon2):
         r = 3958.7613
@@ -57,6 +69,45 @@ def register_ops_routes(app, ctx):
             }
         except (TypeError, ValueError):
             return None
+
+    def kiosk_actor_key():
+        actor_hint = request.headers.get("X-Kiosk-Actor", "").strip()
+        if actor_hint:
+            return f"kiosk_actor:{actor_hint[:64]}"
+        ip = request.remote_addr or "unknown"
+        return f"kiosk_ip:{ip}"
+
+    def enforce_kiosk_rate_limit(action, max_per_minute):
+        now = utc_now()
+        bucket = now.strftime("%Y-%m-%dT%H:%M")
+        previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
+        actor_key = kiosk_actor_key()
+        db = get_db()
+        row = db.execute(
+            "SELECT attempt_count FROM abuse_attempts WHERE actor_key=? AND action=? AND minute_bucket=?",
+            (actor_key, action, bucket),
+        ).fetchone()
+        count = (row["attempt_count"] if row else 0) + 1
+        if row:
+            db.execute(
+                "UPDATE abuse_attempts SET attempt_count=? WHERE actor_key=? AND action=? AND minute_bucket=?",
+                (count, actor_key, action, bucket),
+            )
+        else:
+            db.execute(
+                "INSERT INTO abuse_attempts (actor_key,action,minute_bucket,attempt_count) VALUES (?,?,?,?)",
+                (actor_key, action, bucket, count),
+            )
+
+        rolling = db.execute(
+            "SELECT COALESCE(SUM(attempt_count),0) FROM abuse_attempts WHERE actor_key=? AND action=? AND minute_bucket IN (?,?)",
+            (actor_key, action, bucket, previous_bucket),
+        ).fetchone()[0]
+        db.commit()
+        if rolling > max_per_minute:
+            log_risk("kiosk_abuse_throttle", f"actor={actor_key}, action={action}, count_60s={rolling}", None)
+            return jsonify({"error": "Rate limit exceeded", "retry_after_seconds": 60}), 429
+        return None
 
     def insert_ping(db, parsed, source, user_id=None):
         previous = db.execute(
@@ -223,6 +274,9 @@ def register_ops_routes(app, ctx):
 
     @app.post("/api/kiosk/security/nonce")
     def create_kiosk_nonce():
+        throttled = enforce_kiosk_rate_limit("kiosk_nonce", 30)
+        if throttled:
+            return throttled
         action = request.form.get("action", "")
         if not action:
             return jsonify({"error": "Action required"}), 400
@@ -238,6 +292,9 @@ def register_ops_routes(app, ctx):
 
     @app.post("/api/kiosk/bookings/hold")
     def kiosk_create_hold():
+        throttled = enforce_kiosk_rate_limit("kiosk_hold", 20)
+        if throttled:
+            return throttled
         payload, error = json_payload_or_400()
         if error:
             return error
@@ -249,6 +306,9 @@ def register_ops_routes(app, ctx):
 
     @app.post("/api/kiosk/bookings/confirm")
     def kiosk_confirm_booking():
+        throttled = enforce_kiosk_rate_limit("kiosk_confirm", 20)
+        if throttled:
+            return throttled
         payload, error = json_payload_or_400()
         if error:
             return error
@@ -324,7 +384,10 @@ def register_ops_routes(app, ctx):
             frozen = int(request.form.get("frozen", "1"))
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid frozen value"}), 422
-        get_db().execute("UPDATE bins SET frozen=? WHERE id=?", (frozen, bin_id))
+        cursor = get_db().execute("UPDATE bins SET frozen=? WHERE id=?", (frozen, bin_id))
+        if cursor.rowcount == 0:
+            get_db().rollback()
+            return jsonify({"error": "Bin not found"}), 404
         get_db().commit()
         return jsonify({"ok": True, "frozen": bool(frozen)})
 
@@ -413,6 +476,38 @@ def register_ops_routes(app, ctx):
         db.commit()
         return jsonify({"ok": True, "id": cursor.lastrowid}), 201
 
+    @app.get("/api/depot/bin-rules")
+    @login_required
+    @require_permission("depot:manage")
+    def list_bin_rules():
+        rows = get_db().execute(
+            "SELECT id,rule_type,rule_value,is_active FROM depot_bin_rules ORDER BY rule_type, rule_value"
+        ).fetchall()
+        return jsonify([dict(row) for row in rows])
+
+    @app.post("/api/depot/bin-rules")
+    @login_required
+    @require_permission("depot:manage")
+    def upsert_bin_rule():
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        rule_type = (payload.get("rule_type") or "").strip()
+        rule_value = (payload.get("rule_value") or "").strip()
+        is_active = int(payload.get("is_active", 1))
+        if rule_type not in {"bin_type", "bin_status"}:
+            return jsonify({"error": "Invalid rule_type"}), 422
+        if not rule_value:
+            return jsonify({"error": "rule_value is required"}), 422
+
+        db = get_db()
+        db.execute(
+            "INSERT INTO depot_bin_rules (rule_type,rule_value,is_active) VALUES (?,?,?) ON CONFLICT(rule_type,rule_value) DO UPDATE SET is_active=excluded.is_active",
+            (rule_type, rule_value, 1 if is_active else 0),
+        )
+        db.commit()
+        return jsonify({"ok": True})
+
     @app.post("/api/depot/zones")
     @login_required
     @require_permission("depot:manage")
@@ -458,6 +553,9 @@ def register_ops_routes(app, ctx):
 
         if not code:
             return jsonify({"error": "Bin code is required"}), 422
+        db = get_db()
+        allowed_bin_types = allowed_rule_values(db, "bin_type")
+        allowed_bin_statuses = allowed_rule_values(db, "bin_status")
         if bin_type not in allowed_bin_types:
             return jsonify({"error": f"Invalid bin_type. Allowed: {sorted(allowed_bin_types)}"}), 422
         if status not in allowed_bin_statuses:
@@ -465,7 +563,6 @@ def register_ops_routes(app, ctx):
         if capacity_cuft <= 0 or capacity_lb <= 0:
             return jsonify({"error": "Capacities must be > 0"}), 422
 
-        db = get_db()
         zone = db.execute("SELECT id FROM zones WHERE id=?", (zone_id,)).fetchone()
         if not zone:
             return jsonify({"error": "Zone not found"}), 404
@@ -491,24 +588,30 @@ def register_ops_routes(app, ctx):
         updates = []
         values = []
         if bin_type is not None:
-            if bin_type not in allowed_bin_types:
-                return jsonify({"error": f"Invalid bin_type. Allowed: {sorted(allowed_bin_types)}"}), 422
             updates.append("bin_type=?")
             values.append(bin_type)
         if status is not None:
-            if status not in allowed_bin_statuses:
-                return jsonify({"error": f"Invalid status. Allowed: {sorted(allowed_bin_statuses)}"}), 422
             updates.append("status=?")
             values.append(status)
         if not updates:
             return jsonify({"error": "No metadata fields provided"}), 422
 
         db = get_db()
+        allowed_bin_types = allowed_rule_values(db, "bin_type")
+        allowed_bin_statuses = allowed_rule_values(db, "bin_status")
+        if bin_type is not None and bin_type not in allowed_bin_types:
+            return jsonify({"error": f"Invalid bin_type. Allowed: {sorted(allowed_bin_types)}"}), 422
+        if status is not None and status not in allowed_bin_statuses:
+            return jsonify({"error": f"Invalid status. Allowed: {sorted(allowed_bin_statuses)}"}), 422
+
         exists = db.execute("SELECT id FROM bins WHERE id=?", (bin_id,)).fetchone()
         if not exists:
             return jsonify({"error": "Bin not found"}), 404
         values.append(bin_id)
-        db.execute(f"UPDATE bins SET {', '.join(updates)} WHERE id=?", tuple(values))
+        try:
+            db.execute(f"UPDATE bins SET {', '.join(updates)} WHERE id=?", tuple(values))
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Invalid bin metadata update"}), 422
         db.commit()
         return jsonify({"ok": True})
 

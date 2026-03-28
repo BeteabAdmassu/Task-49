@@ -217,6 +217,9 @@ def test_depot_mutation_requires_permission(tmp_path):
     )
     assert frozen_then_allocate.status_code == 200
 
+    missing_bin = authed_post(client, "/api/depot/bins/999999/freeze", data={"frozen": "1"})
+    assert missing_bin.status_code == 404
+
 
 def test_depot_hierarchy_management_crud_and_validation(tmp_path):
     client, _app = build_client(tmp_path)
@@ -480,6 +483,45 @@ def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     assert b"1.0" in metrics.data
 
 
+def test_experiment_assignment_population_near_5050(tmp_path):
+    client, app = build_client(tmp_path)
+    with app.app_context():
+        db = app.get_db()
+        now = datetime.now(UTC).isoformat()
+        seed_hash = "pbkdf2:sha256:600000$seed$hash"
+        rows = [
+            (f"load_user_{i}", seed_hash, "employee", "Main Depot", now)
+            for i in range(1, 1201)
+        ]
+        db.executemany(
+            "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
+            rows,
+        )
+        db.commit()
+        user_ids = [r[0] for r in db.execute("SELECT id FROM users WHERE username LIKE 'load_user_%' ORDER BY id").fetchall()]
+
+    a_count = 0
+    b_count = 0
+    for uid in user_ids:
+        with client.session_transaction() as sess:
+            sess["user_id"] = uid
+            sess["last_seen"] = datetime.now(UTC).isoformat()
+            sess["csrf_token"] = "seed"
+        assignment = client.get("/api/experiments/assign/suggested-times")
+        assert assignment.status_code == 200
+        variant = assignment.get_json()["variant"]
+        if variant == "A":
+            a_count += 1
+        else:
+            b_count += 1
+
+    total = a_count + b_count
+    a_ratio = a_count / total
+    b_ratio = b_count / total
+    assert 0.45 <= a_ratio <= 0.55
+    assert 0.45 <= b_ratio <= 0.55
+
+
 def test_anomaly_notes_features_social_and_masking(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
@@ -634,12 +676,71 @@ def test_lan_gateway_ingestion_and_csrf_protection(tmp_path):
         assert row["source"] == "lan_gateway"
 
 
+def test_kiosk_nonce_throttling_and_risk_event(tmp_path):
+    client, app = build_client(tmp_path)
+    for _ in range(30):
+        ok = client.post("/api/kiosk/security/nonce", data={"action": "booking_confirm"}, headers={"X-Kiosk-Actor": "abuse-nonce"})
+        assert ok.status_code == 200
+    throttled = client.post("/api/kiosk/security/nonce", data={"action": "booking_confirm"}, headers={"X-Kiosk-Actor": "abuse-nonce"})
+    assert throttled.status_code == 429
+    assert "retry_after_seconds" in throttled.get_json()
+
+    with app.app_context():
+        count = app.get_db().execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='kiosk_abuse_throttle' AND details LIKE '%kiosk_nonce%'"
+        ).fetchone()[0]
+        assert count >= 1
+
+
+def test_kiosk_hold_throttling_and_normal_flow_under_limit(tmp_path):
+    client, app = build_client(tmp_path)
+    with app.app_context():
+        db = app.get_db()
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        db.execute(
+            "UPDATE departures SET departure_time=?, total_seats=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=4)).isoformat(), 500, dep_id),
+        )
+        db.commit()
+
+    normal_hold = client.post(
+        "/api/kiosk/bookings/hold",
+        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+        headers={"X-Kiosk-Actor": "normal-flow"},
+    )
+    assert normal_hold.status_code == 200
+
+    for _ in range(20):
+        response = client.post(
+            "/api/kiosk/bookings/hold",
+            json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+            headers={"X-Kiosk-Actor": "abuse-hold"},
+        )
+        assert response.status_code == 200
+
+    throttled = client.post(
+        "/api/kiosk/bookings/hold",
+        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+        headers={"X-Kiosk-Actor": "abuse-hold"},
+    )
+    assert throttled.status_code == 429
+
+    with app.app_context():
+        risk_count = app.get_db().execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='kiosk_abuse_throttle' AND details LIKE '%kiosk_hold%'"
+        ).fetchone()[0]
+        assert risk_count >= 1
+
+
 def test_malformed_payloads_return_4xx_not_500(tmp_path):
     client, _app = build_client(tmp_path)
     login_supervisor(client)
 
     missing_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2})
     assert missing_relation.status_code == 422
+
+    missing_target = authed_post(client, "/api/social/action", json={"target_user_id": 999999, "relation": "follow"})
+    assert missing_target.status_code == 404
 
     bad_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
     assert bad_relation.status_code == 422
@@ -651,6 +752,253 @@ def test_malformed_payloads_return_4xx_not_500(tmp_path):
         json={"request_nonce": nonce, "bin_id": "bad", "volume_cuft": "x", "weight_lb": "y"},
     )
     assert bad_allocate.status_code == 422
+
+
+def test_nonce_cross_action_misuse_rejected(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    with app.app_context():
+        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        app.get_db().execute(
+            "UPDATE departures SET departure_time=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
+        )
+        app.get_db().commit()
+
+    hold = authed_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    assert hold.status_code == 200
+
+    valid_inventory_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    valid_inventory_adjust = authed_post(
+        client,
+        "/api/depot/allocate",
+        json={
+            "request_nonce": valid_inventory_nonce,
+            "bin_id": 1,
+            "item_name": "ValidNonce",
+            "volume_cuft": 1,
+            "weight_lb": 1,
+        },
+    )
+    assert valid_inventory_adjust.status_code == 200
+
+    replay_inventory_nonce = authed_post(
+        client,
+        "/api/depot/allocate",
+        json={
+            "request_nonce": valid_inventory_nonce,
+            "bin_id": 1,
+            "item_name": "ReplayNonce",
+            "volume_cuft": 1,
+            "weight_lb": 1,
+        },
+    )
+    assert replay_inventory_nonce.status_code == 409
+
+    booking_nonce = authed_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    inventory_with_booking_nonce = authed_post(
+        client,
+        "/api/depot/allocate",
+        json={
+            "request_nonce": booking_nonce,
+            "bin_id": 1,
+            "item_name": "CrossAction",
+            "volume_cuft": 1,
+            "weight_lb": 1,
+        },
+    )
+    assert inventory_with_booking_nonce.status_code == 409
+
+    inventory_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    booking_with_inventory_nonce = authed_post(
+        client,
+        "/api/bookings/confirm",
+        json={
+            "hold_nonce": hold.get_json()["hold_nonce"],
+            "request_nonce": inventory_nonce,
+            "contact": "none@metro.local",
+        },
+    )
+    assert booking_with_inventory_nonce.status_code == 409
+
+
+def test_booking_rule_config_is_db_backed_and_audited(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    initial = client.get("/api/config/booking-rules")
+    assert initial.status_code == 200
+    assert initial.get_json()["seat_hold_timeout_minutes"] == 8
+
+    updated = authed_post(
+        client,
+        "/api/config/booking-rules",
+        json={
+            "booking_min_advance_hours": 3,
+            "booking_max_horizon_days": 20,
+            "commuter_bundle_min_days": 4,
+            "seat_hold_timeout_minutes": 5,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.get_json()["rules"]["seat_hold_timeout_minutes"] == 5
+
+    with app.app_context():
+        count = app.get_db().execute("SELECT COUNT(*) FROM config_audit_log").fetchone()[0]
+        assert count >= 4
+
+    with app.app_context():
+        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        app.get_db().execute(
+            "UPDATE departures SET departure_time=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=3, minutes=5)).isoformat(), dep_id),
+        )
+        app.get_db().commit()
+
+    bundle_reject = authed_post(
+        client,
+        "/api/bookings/hold",
+        json={"departure_id": dep_id, "seats": 1, "product_type": "commuter_bundle", "bundle_days": 3},
+    )
+    assert bundle_reject.status_code == 422
+    assert "minimum 4 days" in bundle_reject.get_json()["error"]
+
+    hold = authed_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    assert hold.status_code == 200
+
+    with app.app_context():
+        expires_at = app.get_db().execute(
+            "SELECT expires_at FROM seat_holds WHERE nonce=?",
+            (hold.get_json()["hold_nonce"],),
+        ).fetchone()[0]
+        delta = datetime.fromisoformat(expires_at) - datetime.now(UTC)
+        assert 4 <= delta.total_seconds() / 60 <= 6
+
+
+def test_auth_status_matrix_and_sensitive_field_non_leakage(tmp_path, caplog):
+    client, app = build_client(tmp_path)
+
+    unauth = client.get("/api/config/booking-rules")
+    assert unauth.status_code == 302
+
+    login_agent(client)
+    forbidden = client.get("/api/config/booking-rules")
+    assert forbidden.status_code == 403
+
+    not_found = authed_post(client, "/api/social/action", json={"target_user_id": 999999, "relation": "follow"})
+    assert not_found.status_code == 404
+
+    invalid = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
+    assert invalid.status_code == 422
+
+    throttle_first = client.get("/api/heartbeat?screen=matrix")
+    assert throttle_first.status_code == 200
+    throttle_second = client.get("/api/heartbeat?screen=matrix")
+    assert throttle_second.status_code == 429
+
+    caplog.set_level(logging.INFO)
+    with app.app_context():
+        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        app.get_db().execute(
+            "UPDATE departures SET departure_time=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
+        )
+        app.get_db().commit()
+
+    hold = authed_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    nonce = authed_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    contact_secret = "private-contact@example.com"
+    confirmed = authed_post(
+        client,
+        "/api/bookings/confirm",
+        json={"hold_nonce": hold.get_json()["hold_nonce"], "request_nonce": nonce, "contact": contact_secret},
+    )
+    assert confirmed.status_code == 200
+    body = confirmed.get_data(as_text=True)
+    assert contact_secret not in body
+    assert "nonce" not in body.lower()
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert contact_secret not in logs
+
+
+def test_analytics_recall_differs_from_precision(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+    with app.app_context():
+        db = app.get_db()
+        now = datetime.now(UTC).isoformat()
+        db.execute("DELETE FROM ranking_samples")
+        db.execute(
+            "INSERT INTO ranking_samples (relevant,recommended,ndcg,covered,diverse,created_at) VALUES (?,?,?,?,?,?)",
+            (1, 1, 1.0, 1, 1, now),
+        )
+        db.execute(
+            "INSERT INTO ranking_samples (relevant,recommended,ndcg,covered,diverse,created_at) VALUES (?,?,?,?,?,?)",
+            (1, 0, 0.3, 1, 0, now),
+        )
+        db.commit()
+
+    page = client.get("/analyst/metrics")
+    assert page.status_code == 200
+    assert b"Precision: 1.0" in page.data
+    assert b"Recall: 0.5" in page.data
+
+
+def test_depot_bin_rules_are_persistence_configurable(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_supervisor(client)
+
+    rules = client.get("/api/depot/bin-rules")
+    assert rules.status_code == 200
+
+    deactivate_standard = authed_post(
+        client,
+        "/api/depot/bin-rules",
+        json={"rule_type": "bin_type", "rule_value": "standard", "is_active": 0},
+    )
+    assert deactivate_standard.status_code == 200
+
+    create_rejected = authed_post(
+        client,
+        "/api/depot/bins",
+        json={
+            "zone_id": 1,
+            "code": "RULE-STD-1",
+            "bin_type": "standard",
+            "status": "available",
+            "capacity_cuft": 10,
+            "capacity_lb": 10,
+        },
+    )
+    assert create_rejected.status_code == 422
+
+    add_new_type = authed_post(
+        client,
+        "/api/depot/bin-rules",
+        json={"rule_type": "bin_type", "rule_value": "oversize", "is_active": 1},
+    )
+    assert add_new_type.status_code == 200
+
+    create_allowed = authed_post(
+        client,
+        "/api/depot/bins",
+        json={
+            "zone_id": 1,
+            "code": "RULE-OVR-1",
+            "bin_type": "oversize",
+            "status": "available",
+            "capacity_cuft": 10,
+            "capacity_lb": 10,
+        },
+    )
+    assert create_allowed.status_code == 201
+
+
+def test_safe_default_debug_mode(tmp_path):
+    os.environ.pop("FLASK_DEBUG", None)
+    _client, app = build_client(tmp_path)
+    assert app.debug is False
 
 
 def test_face_identifier_logging_uses_mask_only(tmp_path, caplog):

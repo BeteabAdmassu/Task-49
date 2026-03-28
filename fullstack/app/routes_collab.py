@@ -275,6 +275,9 @@ def register_collab_routes(app, ctx):
             return jsonify({"error": "Cannot relate to self"}), 400
 
         db = get_db()
+        target_user = db.execute("SELECT id FROM users WHERE id=?", (target_id,)).fetchone()
+        if not target_user:
+            return jsonify({"error": "target_user_id not found"}), 404
         if relation == "unfollow":
             db.execute(
                 "DELETE FROM relationships WHERE user_a=? AND user_b=? AND relation='follow'",
@@ -392,12 +395,21 @@ def register_collab_routes(app, ctx):
         rank = db.execute(
             """
             SELECT
-              AVG(CASE WHEN recommended=1 AND relevant=1 THEN 1.0 ELSE 0 END) AS precision,
-              AVG(CASE WHEN relevant=1 AND recommended=1 THEN 1.0 ELSE 0 END) AS recall,
-              AVG(ndcg) AS ndcg,
-              AVG(covered) AS coverage,
-              AVG(diverse) AS diversity
-            FROM ranking_samples
+              CASE WHEN (tp + fp) > 0 THEN 1.0 * tp / (tp + fp) ELSE 0 END AS precision,
+              CASE WHEN (tp + fn) > 0 THEN 1.0 * tp / (tp + fn) ELSE 0 END AS recall,
+              avg_ndcg AS ndcg,
+              avg_coverage AS coverage,
+              avg_diversity AS diversity
+            FROM (
+              SELECT
+                SUM(CASE WHEN recommended=1 AND relevant=1 THEN 1 ELSE 0 END) AS tp,
+                SUM(CASE WHEN recommended=1 AND relevant=0 THEN 1 ELSE 0 END) AS fp,
+                SUM(CASE WHEN recommended=0 AND relevant=1 THEN 1 ELSE 0 END) AS fn,
+                AVG(ndcg) AS avg_ndcg,
+                AVG(covered) AS avg_coverage,
+                AVG(diverse) AS avg_diversity
+              FROM ranking_samples
+            )
             """
         ).fetchone()
 

@@ -52,6 +52,28 @@ CREATE TABLE IF NOT EXISTS refresh_cadence (
     last_seen TEXT NOT NULL,
     PRIMARY KEY(actor_key, screen)
 );
+CREATE TABLE IF NOT EXISTS abuse_attempts (
+    actor_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    minute_bucket TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(actor_key, action, minute_bucket)
+);
+CREATE TABLE IF NOT EXISTS system_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by INTEGER
+);
+CREATE TABLE IF NOT EXISTS config_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT NOT NULL,
+    changed_by INTEGER NOT NULL,
+    changed_at TEXT NOT NULL,
+    reason TEXT
+);
 CREATE TABLE IF NOT EXISTS routes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE NOT NULL,
@@ -141,6 +163,13 @@ CREATE TABLE IF NOT EXISTS bins (
     status TEXT NOT NULL DEFAULT 'available',
     frozen INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(zone_id) REFERENCES zones(id)
+);
+CREATE TABLE IF NOT EXISTS depot_bin_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_type TEXT NOT NULL CHECK(rule_type IN ('bin_type','bin_status')),
+    rule_value TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(rule_type, rule_value)
 );
 CREATE TABLE IF NOT EXISTS inventory_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,6 +280,51 @@ def _ensure_migrations(db):
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS abuse_attempts (
+            actor_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            minute_bucket TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(actor_key, action, minute_bucket)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by INTEGER
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS config_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT NOT NULL,
+            changed_by INTEGER NOT NULL,
+            changed_at TEXT NOT NULL,
+            reason TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS depot_bin_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_type TEXT NOT NULL CHECK(rule_type IN ('bin_type','bin_status')),
+            rule_value TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(rule_type, rule_value)
+        )
+        """
+    )
     note_cols = {row[1] for row in db.execute("PRAGMA table_info(notes)").fetchall()}
     if "depot_scope" not in note_cols:
         db.execute("ALTER TABLE notes ADD COLUMN depot_scope TEXT")
@@ -262,6 +336,30 @@ def _ensure_migrations(db):
         )
         WHERE depot_scope IS NULL
         """
+    )
+    default_rules = [
+        ("bin_type", "standard"),
+        ("bin_type", "cold"),
+        ("bin_type", "hazmat"),
+        ("bin_type", "secure"),
+        ("bin_status", "available"),
+        ("bin_status", "unavailable"),
+        ("bin_status", "maintenance"),
+    ]
+    db.executemany(
+        "INSERT OR IGNORE INTO depot_bin_rules (rule_type,rule_value,is_active) VALUES (?,?,1)",
+        default_rules,
+    )
+
+    default_config = [
+        ("booking_min_advance_hours", "2"),
+        ("booking_max_horizon_days", "30"),
+        ("commuter_bundle_min_days", "3"),
+        ("seat_hold_timeout_minutes", "8"),
+    ]
+    db.executemany(
+        "INSERT OR IGNORE INTO system_config (key,value,updated_at,updated_by) VALUES (?,?,datetime('now'),NULL)",
+        default_config,
     )
 
 
@@ -281,6 +379,7 @@ def initialize_database(db_path, utc_now, to_iso):
             "experiments:manage",
             "analytics:view",
             "depot:manage",
+            "config:manage",
         ],
         "hr": ["notes:read", "notes:write", "reports:view"],
         "admin": [
@@ -291,6 +390,7 @@ def initialize_database(db_path, utc_now, to_iso):
             "experiments:manage",
             "analytics:view",
             "depot:manage",
+            "config:manage",
             "admin:all",
         ],
     }
