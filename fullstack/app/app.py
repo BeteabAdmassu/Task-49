@@ -458,7 +458,14 @@ def create_app():
                     return redirect(url_for("login"))
             session["last_seen"] = to_iso(now)
 
-        refresh_endpoints = {"heartbeat", "arrival_board", "route_distribution", "seat_availability_partial", "search_departures"}
+        refresh_endpoints = {
+            "heartbeat",
+            "arrival_board",
+            "route_distribution",
+            "seat_availability_partial",
+            "seat_availability_query",
+            "search_departures",
+        }
         if request.endpoint in refresh_endpoints:
             now = utc_now()
             db = get_db()

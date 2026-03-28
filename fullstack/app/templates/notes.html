@@ -14,6 +14,12 @@
 </section>
 
 <section class="panel">
+  <h3>Cross-Task Rollups</h3>
+  <button onclick="loadRollups()">Refresh Rollups</button>
+  <div id="rollups-table"></div>
+</section>
+
+<section class="panel">
   <h3>Create / Update Note</h3>
   <div class="stack">
     <label>Note ID (leave blank to create) <input id="note-id" type="number" min="1"></label>
@@ -62,6 +68,32 @@
 <script>
   function setStatus(message) {
     document.getElementById("notes-status").textContent = message;
+  }
+
+  function renderRollupTable(rows) {
+    const target = document.getElementById("rollups-table");
+    if (!rows.length) {
+      target.innerHTML = "<p class='hint'>No rollup data yet.</p>";
+      return;
+    }
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Note Type</th><th>Total</th><th>Linked</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr><td>${r.note_type}</td><td>${r.total}</td><td>${r.linked || 0}</td></tr>`).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  async function loadRollups() {
+    const res = await fetch("/api/notes/rollup");
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus("Unable to load rollups.");
+      return;
+    }
+    renderRollupTable(data);
   }
 
   async function saveNote() {
@@ -168,5 +200,7 @@
     }
     preview.innerHTML = `<h4>${data.title}</h4>${data.html}`;
   }
+
+  loadRollups();
 </script>
 {% endblock %}

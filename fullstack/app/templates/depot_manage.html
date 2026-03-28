@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Depot Hierarchy Manager</h2>
+  <p class="hint">Manage Warehouse -> Zone -> Bin structure and bin metadata.</p>
+  <button onclick="loadHierarchy()">Refresh Hierarchy</button>
+  <div id="depot-status" class="hint"></div>
+</section>
+
+<section class="grid">
+  <article class="panel">
+    <h3>Create Warehouse</h3>
+    <div class="stack">
+      <label>Name <input id="warehouse-name"></label>
+      <button onclick="createWarehouse()">Create Warehouse</button>
+    </div>
+  </article>
+
+  <article class="panel">
+    <h3>Create Zone</h3>
+    <div class="stack">
+      <label>Warehouse ID <input id="zone-warehouse-id" type="number" min="1"></label>
+      <label>Name <input id="zone-name"></label>
+      <button onclick="createZone()">Create Zone</button>
+    </div>
+  </article>
+
+  <article class="panel">
+    <h3>Create Bin</h3>
+    <div class="stack">
+      <label>Zone ID <input id="bin-zone-id" type="number" min="1"></label>
+      <label>Code <input id="bin-code"></label>
+      <label>Type
+        <select id="bin-type">
+          <option value="standard">standard</option>
+          <option value="cold">cold</option>
+          <option value="hazmat">hazmat</option>
+          <option value="secure">secure</option>
+        </select>
+      </label>
+      <label>Status
+        <select id="bin-status">
+          <option value="available">available</option>
+          <option value="unavailable">unavailable</option>
+          <option value="maintenance">maintenance</option>
+        </select>
+      </label>
+      <label>Capacity (cuft) <input id="bin-capacity-cuft" type="number" min="1" step="0.1"></label>
+      <label>Capacity (lb) <input id="bin-capacity-lb" type="number" min="1" step="0.1"></label>
+      <button onclick="createBin()">Create Bin</button>
+    </div>
+  </article>
+</section>
+
+<section class="panel">
+  <h3>Update Bin Metadata</h3>
+  <div class="stack inline">
+    <label>Bin ID <input id="update-bin-id" type="number" min="1"></label>
+    <label>Type
+      <select id="update-bin-type">
+        <option value="">(no change)</option>
+        <option value="standard">standard</option>
+        <option value="cold">cold</option>
+        <option value="hazmat">hazmat</option>
+        <option value="secure">secure</option>
+      </select>
+    </label>
+    <label>Status
+      <select id="update-bin-status">
+        <option value="">(no change)</option>
+        <option value="available">available</option>
+        <option value="unavailable">unavailable</option>
+        <option value="maintenance">maintenance</option>
+      </select>
+    </label>
+    <button onclick="updateBinMetadata()">Update Bin</button>
+  </div>
+</section>
+
+<section class="panel">
+  <h3>Warehouses</h3>
+  <div id="warehouses-table"></div>
+  <h3>Zones</h3>
+  <div id="zones-table"></div>
+  <h3>Bins</h3>
+  <div id="bins-table"></div>
+</section>
+
+<script>
+  function setDepotStatus(message) {
+    document.getElementById("depot-status").textContent = message;
+  }
+
+  function renderTable(targetId, headers, rows) {
+    const target = document.getElementById(targetId);
+    if (!rows.length) {
+      target.innerHTML = "<p class='hint'>No records.</p>";
+      return;
+    }
+    const thead = `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>`;
+    const tbody = `<tbody>${rows.map((r) => `<tr>${headers.map((h) => `<td>${r[h] ?? ""}</td>`).join("")}</tr>`).join("")}</tbody>`;
+    target.innerHTML = `<table>${thead}${tbody}</table>`;
+  }
+
+  async function loadHierarchy() {
+    const res = await fetch("/api/depot/hierarchy");
+    const data = await res.json();
+    if (!res.ok) {
+      setDepotStatus(data.error || "Failed to load hierarchy.");
+      return;
+    }
+    renderTable("warehouses-table", ["id", "name"], data.warehouses || []);
+    renderTable("zones-table", ["id", "warehouse_id", "name"], data.zones || []);
+    renderTable("bins-table", ["id", "zone_id", "code", "bin_type", "status", "frozen", "capacity_cuft", "capacity_lb", "current_cuft", "current_lb"], data.bins || []);
+  }
+
+  async function createWarehouse() {
+    const payload = { name: document.getElementById("warehouse-name").value };
+    const res = await fetch("/api/depot/warehouses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setDepotStatus(res.ok ? `Warehouse created #${data.id}` : (data.error || "Create failed"));
+    if (res.ok) loadHierarchy();
+  }
+
+  async function createZone() {
+    const payload = {
+      warehouse_id: Number(document.getElementById("zone-warehouse-id").value),
+      name: document.getElementById("zone-name").value,
+    };
+    const res = await fetch("/api/depot/zones", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setDepotStatus(res.ok ? `Zone created #${data.id}` : (data.error || "Create failed"));
+    if (res.ok) loadHierarchy();
+  }
+
+  async function createBin() {
+    const payload = {
+      zone_id: Number(document.getElementById("bin-zone-id").value),
+      code: document.getElementById("bin-code").value,
+      bin_type: document.getElementById("bin-type").value,
+      status: document.getElementById("bin-status").value,
+      capacity_cuft: Number(document.getElementById("bin-capacity-cuft").value),
+      capacity_lb: Number(document.getElementById("bin-capacity-lb").value),
+    };
+    const res = await fetch("/api/depot/bins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setDepotStatus(res.ok ? `Bin created #${data.id}` : (data.error || "Create failed"));
+    if (res.ok) loadHierarchy();
+  }
+
+  async function updateBinMetadata() {
+    const binId = Number(document.getElementById("update-bin-id").value);
+    const payload = {};
+    const type = document.getElementById("update-bin-type").value;
+    const status = document.getElementById("update-bin-status").value;
+    if (type) payload.bin_type = type;
+    if (status) payload.status = status;
+    const res = await fetch(`/api/depot/bins/${binId}/metadata`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    setDepotStatus(res.ok ? "Bin metadata updated" : (data.error || "Update failed"));
+    if (res.ok) loadHierarchy();
+  }
+
+  loadHierarchy();
+</script>
+{% endblock %}

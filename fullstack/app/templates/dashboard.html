@@ -26,13 +26,20 @@
   <article class="panel">
     <h2>Reservation Seat Availability</h2>
     <label>Departure
-      <select id="departure-select" onchange="refreshSeatAvailability()">
+      <select id="departure-select" name="departure_id">
         {% for departure in departures %}
           <option value="{{ departure.id }}">{{ departure.code }} @ {{ departure.departure_time }}</option>
         {% endfor %}
       </select>
     </label>
-    <div id="seat-availability">Select a departure.</div>
+    <div
+      id="seat-availability"
+      hx-get="{{ url_for('seat_availability_query') }}?screen=dashboard-seat-availability"
+      hx-trigger="load, every 10s, change from:#departure-select"
+      hx-include="#departure-select"
+      hx-swap="innerHTML">
+      Loading seat availability...
+    </div>
   </article>
 
   <article class="panel">
@@ -44,6 +51,7 @@
       {% if user.role in ['supervisor', 'admin'] %}
       <li><a href="{{ url_for('supervisor_experiments') }}">Experiment Controls</a></li>
       <li><a href="{{ url_for('analyst_metrics') }}">Analytics Dashboard</a></li>
+      <li><a href="{{ url_for('depot_manage_page') }}">Depot Hierarchy Manager</a></li>
       {% endif %}
       {% if user.role in ['hr', 'admin'] %}
       <li><a href="{{ url_for('reports_index') }}">Governance Reports</a></li>
@@ -54,12 +62,6 @@
 </section>
 
 <script>
-  function refreshSeatAvailability() {
-    const departureId = document.getElementById("departure-select").value;
-    htmx.ajax("GET", `/api/seat-availability/${departureId}`, "#seat-availability");
-  }
-  refreshSeatAvailability();
-
   async function loadExperimentLabel() {
     try {
       const response = await fetch("/api/experiments/assign/suggested-times");

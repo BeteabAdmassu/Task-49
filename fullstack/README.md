@@ -52,6 +52,24 @@ set METROOPS_GATEWAY_TOKEN=your-strong-local-token
 If `METROOPS_GATEWAY_TOKEN` is not configured, startup logs a warning and LAN gateway ingestion stays disabled.
 - HTMX is vendored locally in `app/static/vendor/htmx.min.js` for offline operation.
 
+## New Operational Surfaces
+
+- Live seat availability polling: `/api/seat-availability?departure_id=<id>&screen=dashboard-seat-availability`
+- Depot hierarchy management page: `/depot/manage`
+- Depot hierarchy APIs:
+  - `GET /api/depot/hierarchy`
+  - `POST /api/depot/warehouses`
+  - `POST /api/depot/zones`
+  - `POST /api/depot/bins`
+  - `POST /api/depot/bins/<id>/metadata`
+
+## Verification Steps
+
+1. Login as `supervisor01` and open `/dashboard`.
+2. Confirm seat availability auto-refreshes every 10s after selecting departure.
+3. Open `/depot/manage`, create warehouse/zone/bin, then update bin type/status.
+4. Open `/notes`, confirm Cross-Task Rollups section loads from `/api/notes/rollup`.
+
 ## Maintainability Updates
 
 - Database bootstrap and migration logic moved to `app/db_bootstrap.py` to reduce `app.py` coupling.

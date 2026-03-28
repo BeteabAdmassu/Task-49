@@ -154,6 +154,27 @@ def test_refresh_governance_applies_to_arrival_endpoint(tmp_path):
     assert second.status_code == 429
 
 
+def test_seat_availability_query_endpoint_and_refresh_cap(tmp_path):
+    client, app = build_client(tmp_path)
+    with app.app_context():
+        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+
+    first = client.get(f"/api/seat-availability?departure_id={dep_id}&screen=dashboard-seat-availability")
+    assert first.status_code == 200
+    assert b"Seats remaining" in first.data
+    second = client.get(f"/api/seat-availability?departure_id={dep_id}&screen=dashboard-seat-availability")
+    assert second.status_code == 429
+
+
+def test_dashboard_contains_htmx_seat_refresh(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+    page = client.get("/dashboard")
+    assert page.status_code == 200
+    assert b"hx-trigger=\"load, every 10s, change from:#departure-select\"" in page.data
+    assert b"screen=dashboard-seat-availability" in page.data
+
+
 def test_depot_mutation_requires_permission(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
@@ -194,6 +215,62 @@ def test_depot_mutation_requires_permission(tmp_path):
         },
     )
     assert frozen_then_allocate.status_code == 200
+
+
+def test_depot_hierarchy_management_crud_and_validation(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_supervisor(client)
+
+    hierarchy = client.get("/api/depot/hierarchy")
+    assert hierarchy.status_code == 200
+    payload = hierarchy.get_json()
+    assert "warehouses" in payload and "zones" in payload and "bins" in payload
+
+    created_wh = authed_post(client, "/api/depot/warehouses", json={"name": "Overflow Depot"})
+    assert created_wh.status_code == 201
+    warehouse_id = created_wh.get_json()["id"]
+
+    created_zone = authed_post(client, "/api/depot/zones", json={"warehouse_id": warehouse_id, "name": "Zone X"})
+    assert created_zone.status_code == 201
+    zone_id = created_zone.get_json()["id"]
+
+    bad_bin = authed_post(
+        client,
+        "/api/depot/bins",
+        json={
+            "zone_id": zone_id,
+            "code": "X-01",
+            "bin_type": "invalid",
+            "status": "available",
+            "capacity_cuft": 10,
+            "capacity_lb": 100,
+        },
+    )
+    assert bad_bin.status_code == 422
+
+    created_bin = authed_post(
+        client,
+        "/api/depot/bins",
+        json={
+            "zone_id": zone_id,
+            "code": "X-01",
+            "bin_type": "secure",
+            "status": "maintenance",
+            "capacity_cuft": 10,
+            "capacity_lb": 100,
+        },
+    )
+    assert created_bin.status_code == 201
+    bin_id = created_bin.get_json()["id"]
+
+    meta_bad = authed_post(client, f"/api/depot/bins/{bin_id}/metadata", json={"status": "bad"})
+    assert meta_bad.status_code == 422
+    meta_ok = authed_post(client, f"/api/depot/bins/{bin_id}/metadata", json={"status": "available", "bin_type": "cold"})
+    assert meta_ok.status_code == 200
+
+    manage_page = client.get("/depot/manage")
+    assert manage_page.status_code == 200
+    assert b"Depot Hierarchy Manager" in manage_page.data
 
 
 def test_note_object_level_authorization(tmp_path):
@@ -284,6 +361,15 @@ def test_notes_depot_scope_isolation(tmp_path):
     assert page.status_code == 200
     assert b"Main Depot SOP" in page.data
     assert b"Remote Only Note" not in page.data
+
+
+def test_notes_page_rollup_ui_section_present(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+    page = client.get("/notes")
+    assert page.status_code == 200
+    assert b"Cross-Task Rollups" in page.data
+    assert b"/api/notes/rollup" in page.data
 
 
 def test_reports_page_access_and_content(tmp_path):

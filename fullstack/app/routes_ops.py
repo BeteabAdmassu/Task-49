@@ -21,6 +21,8 @@ def register_ops_routes(app, ctx):
     confirm_booking_for_user = ctx["confirm_booking_for_user"]
     ensure_kiosk_user_id = ctx["ensure_kiosk_user_id"]
     gateway_token = app.config.get("GATEWAY_TOKEN", "")
+    allowed_bin_types = {"standard", "cold", "hazmat", "secure"}
+    allowed_bin_statuses = {"available", "unavailable", "maintenance"}
 
     def great_circle_miles(lat1, lon1, lat2, lon2):
         r = 3958.7613
@@ -159,6 +161,18 @@ def register_ops_routes(app, ctx):
 
     @app.get("/api/seat-availability/<int:departure_id>")
     def seat_availability_partial(departure_id):
+        seats = available_seats(get_db(), departure_id)
+        return render_template(
+            "partials/seat_availability.html",
+            seats=seats,
+            last_updated=format_clock(utc_now()),
+        )
+
+    @app.get("/api/seat-availability")
+    def seat_availability_query():
+        departure_id = request.args.get("departure_id", type=int)
+        if not departure_id:
+            return jsonify({"error": "departure_id is required"}), 422
         seats = available_seats(get_db(), departure_id)
         return render_template(
             "partials/seat_availability.html",
@@ -358,6 +372,144 @@ def register_ops_routes(app, ctx):
         except Exception:
             db.rollback()
             raise
+        return jsonify({"ok": True})
+
+    @app.get("/depot/manage")
+    @login_required
+    @require_permission("depot:manage")
+    def depot_manage_page():
+        return render_template("depot_manage.html")
+
+    @app.get("/api/depot/hierarchy")
+    @login_required
+    @require_permission("depot:manage")
+    def depot_hierarchy():
+        db = get_db()
+        warehouses = [dict(row) for row in db.execute("SELECT id,name FROM warehouses ORDER BY name").fetchall()]
+        zones = [dict(row) for row in db.execute("SELECT id,warehouse_id,name FROM zones ORDER BY name").fetchall()]
+        bins = [
+            dict(row)
+            for row in db.execute(
+                "SELECT id,zone_id,code,bin_type,status,frozen,capacity_cuft,capacity_lb,current_cuft,current_lb FROM bins ORDER BY code"
+            ).fetchall()
+        ]
+        return jsonify({"warehouses": warehouses, "zones": zones, "bins": bins})
+
+    @app.post("/api/depot/warehouses")
+    @login_required
+    @require_permission("depot:manage")
+    def create_warehouse():
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Warehouse name is required"}), 422
+        db = get_db()
+        exists = db.execute("SELECT 1 FROM warehouses WHERE name=?", (name,)).fetchone()
+        if exists:
+            return jsonify({"error": "Warehouse already exists"}), 409
+        cursor = db.execute("INSERT INTO warehouses (name) VALUES (?)", (name,))
+        db.commit()
+        return jsonify({"ok": True, "id": cursor.lastrowid}), 201
+
+    @app.post("/api/depot/zones")
+    @login_required
+    @require_permission("depot:manage")
+    def create_zone():
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        name = (payload.get("name") or "").strip()
+        try:
+            warehouse_id = int(payload.get("warehouse_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Valid warehouse_id is required"}), 422
+        if not name:
+            return jsonify({"error": "Zone name is required"}), 422
+
+        db = get_db()
+        warehouse = db.execute("SELECT id FROM warehouses WHERE id=?", (warehouse_id,)).fetchone()
+        if not warehouse:
+            return jsonify({"error": "Warehouse not found"}), 404
+        exists = db.execute("SELECT 1 FROM zones WHERE warehouse_id=? AND name=?", (warehouse_id, name)).fetchone()
+        if exists:
+            return jsonify({"error": "Zone already exists in warehouse"}), 409
+        cursor = db.execute("INSERT INTO zones (warehouse_id,name) VALUES (?,?)", (warehouse_id, name))
+        db.commit()
+        return jsonify({"ok": True, "id": cursor.lastrowid}), 201
+
+    @app.post("/api/depot/bins")
+    @login_required
+    @require_permission("depot:manage")
+    def create_bin():
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        code = (payload.get("code") or "").strip()
+        bin_type = (payload.get("bin_type") or "").strip()
+        status = (payload.get("status") or "").strip()
+        try:
+            zone_id = int(payload.get("zone_id"))
+            capacity_cuft = float(payload.get("capacity_cuft"))
+            capacity_lb = float(payload.get("capacity_lb"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid zone_id/capacity values"}), 422
+
+        if not code:
+            return jsonify({"error": "Bin code is required"}), 422
+        if bin_type not in allowed_bin_types:
+            return jsonify({"error": f"Invalid bin_type. Allowed: {sorted(allowed_bin_types)}"}), 422
+        if status not in allowed_bin_statuses:
+            return jsonify({"error": f"Invalid status. Allowed: {sorted(allowed_bin_statuses)}"}), 422
+        if capacity_cuft <= 0 or capacity_lb <= 0:
+            return jsonify({"error": "Capacities must be > 0"}), 422
+
+        db = get_db()
+        zone = db.execute("SELECT id FROM zones WHERE id=?", (zone_id,)).fetchone()
+        if not zone:
+            return jsonify({"error": "Zone not found"}), 404
+        duplicate = db.execute("SELECT 1 FROM bins WHERE zone_id=? AND code=?", (zone_id, code)).fetchone()
+        if duplicate:
+            return jsonify({"error": "Bin code already exists in zone"}), 409
+        cursor = db.execute(
+            "INSERT INTO bins (zone_id,code,bin_type,capacity_cuft,capacity_lb,status) VALUES (?,?,?,?,?,?)",
+            (zone_id, code, bin_type, capacity_cuft, capacity_lb, status),
+        )
+        db.commit()
+        return jsonify({"ok": True, "id": cursor.lastrowid}), 201
+
+    @app.post("/api/depot/bins/<int:bin_id>/metadata")
+    @login_required
+    @require_permission("depot:manage")
+    def update_bin_metadata(bin_id):
+        payload, error = json_payload_or_400()
+        if error:
+            return error
+        bin_type = payload.get("bin_type")
+        status = payload.get("status")
+        updates = []
+        values = []
+        if bin_type is not None:
+            if bin_type not in allowed_bin_types:
+                return jsonify({"error": f"Invalid bin_type. Allowed: {sorted(allowed_bin_types)}"}), 422
+            updates.append("bin_type=?")
+            values.append(bin_type)
+        if status is not None:
+            if status not in allowed_bin_statuses:
+                return jsonify({"error": f"Invalid status. Allowed: {sorted(allowed_bin_statuses)}"}), 422
+            updates.append("status=?")
+            values.append(status)
+        if not updates:
+            return jsonify({"error": "No metadata fields provided"}), 422
+
+        db = get_db()
+        exists = db.execute("SELECT id FROM bins WHERE id=?", (bin_id,)).fetchone()
+        if not exists:
+            return jsonify({"error": "Bin not found"}), 404
+        values.append(bin_id)
+        db.execute(f"UPDATE bins SET {', '.join(updates)} WHERE id=?", tuple(values))
+        db.commit()
         return jsonify({"ok": True})
 
     @app.get("/api/departures/search")
