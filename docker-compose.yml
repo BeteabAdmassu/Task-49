@@ -1,0 +1,28 @@
+services:
+  metroops:
+    build:
+      context: ./repo
+      dockerfile: Dockerfile
+    container_name: metroops
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_DEBUG: "0"
+      DISABLE_TLS_ENFORCEMENT: "0"
+      SESSION_COOKIE_SECURE: "1"
+      SESSION_COOKIE_SAMESITE: "Lax"
+      METROOPS_DB_PATH: "/app/data/metroops.db"
+      METROOPS_KEY_PATH: "/app/data/secret.key"
+      METROOPS_GATEWAY_TOKEN: "replace-me-for-production"
+    volumes:
+      - metroops_data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate --spider -q https://127.0.0.1:5000/login || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  metroops_data:

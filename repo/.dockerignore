@@ -3,3 +3,10 @@ node_modules
 *.log
 .git
 .DS_Store
+__pycache__
+.pytest_cache
+data
+unit_tests
+API_tests
+run_tests.sh
+README.md

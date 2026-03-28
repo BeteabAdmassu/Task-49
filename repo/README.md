@@ -2,7 +2,34 @@
 
 Offline-first Flask + HTMX portal for reservations, service visibility, depot logistics, governance, and analytics.
 
-## Quick Start
+## Docker Quick Start
+
+From the project root (the folder that contains `docker-compose.yml`), start everything with:
+
+```bash
+docker compose up
+```
+
+This single command builds and starts the full stack with no manual dependency setup.
+
+## Services and Ports
+
+- `metroops` (Flask app): `https://localhost:5000` (mapped from container port `5000`)
+
+## Verify It Is Working
+
+1. Start with `docker compose up` and wait until the `metroops` container is healthy.
+2. Open `https://localhost:5000/login` in your browser (self-signed cert warning is expected in local Docker).
+3. Sign in with `supervisor01` / `MetroOpsPass!02` and confirm `/dashboard` loads.
+4. Optional CLI check:
+
+```bash
+curl -k https://localhost:5000/login
+```
+
+You should receive an HTML response for the login page.
+
+## Local (Non-Docker) Quick Start
 
 1. Install dependencies:
 
