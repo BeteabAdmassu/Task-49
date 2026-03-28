@@ -1191,6 +1191,10 @@ def test_booking_rule_config_is_db_backed_and_audited(tmp_path):
     client, app = build_client(tmp_path)
     login_supervisor(client)
 
+    kiosk_before = client.get("/kiosk")
+    assert kiosk_before.status_code == 200
+    assert b"Hold Seat (8 min)" in kiosk_before.data
+
     initial = client.get("/api/config/booking-rules")
     assert initial.status_code == 200
     assert initial.get_json()["seat_hold_timeout_minutes"] == 8
@@ -1207,6 +1211,10 @@ def test_booking_rule_config_is_db_backed_and_audited(tmp_path):
     )
     assert updated.status_code == 200
     assert updated.get_json()["rules"]["seat_hold_timeout_minutes"] == 5
+
+    kiosk_after = client.get("/kiosk")
+    assert kiosk_after.status_code == 200
+    assert b"Hold Seat (5 min)" in kiosk_after.data
 
     with app.app_context():
         count = app.get_db().execute("SELECT COUNT(*) FROM config_audit_log").fetchone()[0]

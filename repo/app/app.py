@@ -9,19 +9,8 @@ from functools import wraps
 from pathlib import Path
 
 from cryptography.fernet import Fernet
-from flask import (
-    Flask,
-    abort,
-    flash,
-    g,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    session,
-    url_for,
-)
-from werkzeug.security import check_password_hash, generate_password_hash
+from flask import Flask, abort, g, redirect, request, session, url_for
+from werkzeug.security import generate_password_hash
 
 try:
     from .db_bootstrap import initialize_database
@@ -37,6 +26,21 @@ try:
     from .routes_ops import register_ops_routes
 except ImportError:
     from routes_ops import register_ops_routes
+
+try:
+    from .core_routes import register_core_routes
+except ImportError:
+    from core_routes import register_core_routes
+
+try:
+    from .security_middleware import register_security_guards
+except ImportError:
+    from security_middleware import register_security_guards
+
+try:
+    from .config import resolve_tls_disable_policy, validated_gateway_token
+except ImportError:
+    from config import resolve_tls_disable_policy, validated_gateway_token
 
 try:
     import markdown
@@ -81,46 +85,9 @@ def load_fernet():
     return Fernet(KEY_PATH.read_bytes())
 
 
-def validated_gateway_token(raw_value):
-    token = (raw_value or "").strip()
-    if not token:
-        return "", "not set"
-    lowered = token.lower()
-    placeholder_markers = (
-        "replace-me",
-        "changeme",
-        "change-me",
-        "placeholder",
-        "example",
-        "your-token",
-        "your-strong-local-token",
-        "set-me",
-    )
-    if any(marker in lowered for marker in placeholder_markers):
-        return "", "placeholder-like value"
-    return token, "configured"
-
-
-def runtime_env_mode():
-    raw_mode = (
-        os.environ.get("METROOPS_RUNTIME_ENV")
-        or os.environ.get("FLASK_ENV")
-        or os.environ.get("APP_ENV")
-        or "production"
-    )
-    mode = raw_mode.strip().lower()
-    development_modes = {"development", "dev", "local", "test", "testing"}
-    return mode, mode in development_modes
-
-
 def create_app():
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    runtime_env, development_mode = runtime_env_mode()
-    tls_disable_requested = os.environ.get("DISABLE_TLS_ENFORCEMENT", "0") == "1"
-    if tls_disable_requested and not development_mode:
-        raise RuntimeError(
-            "DISABLE_TLS_ENFORCEMENT=1 is allowed only in development/test/local runtime modes"
-        )
+    runtime_env, tls_disable = resolve_tls_disable_policy(os.environ.get("DISABLE_TLS_ENFORCEMENT", "0"))
     app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
     app.config["RUNTIME_ENV"] = runtime_env
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
@@ -129,7 +96,7 @@ def create_app():
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
     app.config["TLS_REQUIRED"] = True
-    app.config["DISABLE_TLS_ENFORCEMENT"] = tls_disable_requested and development_mode
+    app.config["DISABLE_TLS_ENFORCEMENT"] = tls_disable
     gateway_token, gateway_token_state = validated_gateway_token(os.environ.get("METROOPS_GATEWAY_TOKEN"))
     app.config["GATEWAY_TOKEN"] = gateway_token
     app.config["CSRF_PROTECT"] = True
@@ -501,287 +468,34 @@ def create_app():
         get_db().commit()
         return True, "ok"
 
-    @app.before_request
-    def security_guards():
-        if (
-            app.config["TLS_REQUIRED"]
-            and not app.config["DISABLE_TLS_ENFORCEMENT"]
-            and not app.testing
-            and request.endpoint != "static"
-        ):
-            secure = request.is_secure or request.headers.get("X-Forwarded-Proto") == "https"
-            if not secure:
-                return jsonify({"error": "TLS is required"}), 426
+    register_security_guards(
+        app,
+        {
+            "utc_now": utc_now,
+            "from_iso": from_iso,
+            "to_iso": to_iso,
+            "get_db": get_db,
+            "log_risk": log_risk,
+            "cleanup_expired_holds": cleanup_expired_holds,
+        },
+    )
 
-        if (
-            app.config.get("CSRF_PROTECT", True)
-            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
-            and session.get("user_id")
-            and request.endpoint not in {"login", "static", "gateway_vehicle_pings"}
-        ):
-            header_token = request.headers.get("X-CSRF-Token", "")
-            form_token = request.form.get("csrf_token", "")
-            token = header_token or form_token
-            if token != session.get("csrf_token"):
-                return jsonify({"error": "Invalid CSRF token"}), 403
-
-        if session.get("user_id"):
-            now = utc_now()
-            last_seen = session.get("last_seen")
-            if last_seen:
-                idle = now - from_iso(last_seen)
-                if idle > timedelta(minutes=30):
-                    session.clear()
-                    return redirect(url_for("login"))
-            session["last_seen"] = to_iso(now)
-
-        refresh_endpoints = {
-            "heartbeat",
-            "arrival_board",
-            "route_distribution",
-            "seat_availability_partial",
-            "seat_availability_query",
-            "search_departures",
-        }
-        if request.endpoint in refresh_endpoints:
-            now = utc_now()
-            db = get_db()
-            screen = request.args.get("screen") or request.full_path
-            actor_key = (
-                f"user:{session['user_id']}"
-                if session.get("user_id")
-                else f"anon:{session.setdefault('anon_refresh_id', secrets.token_hex(12))}"
-            )
-
-            cadence = db.execute(
-                "SELECT last_seen FROM refresh_cadence WHERE actor_key=? AND screen=?",
-                (actor_key, screen),
-            ).fetchone()
-            if cadence and (now - from_iso(cadence["last_seen"])) < timedelta(seconds=10):
-                retry_after = max(1, 10 - int((now - from_iso(cadence["last_seen"])).total_seconds()))
-                return jsonify({"error": "Refresh allowed once every 10 seconds", "retry_after_seconds": retry_after}), 429
-
-            db.execute(
-                "INSERT INTO refresh_cadence (actor_key,screen,last_seen) VALUES (?,?,?) ON CONFLICT(actor_key,screen) DO UPDATE SET last_seen=excluded.last_seen",
-                (actor_key, screen, to_iso(now)),
-            )
-
-            if session.get("user_id"):
-                user_id = session["user_id"]
-                bucket = now.strftime("%Y-%m-%dT%H:%M")
-                previous_bucket = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
-                row = db.execute(
-                    "SELECT attempt_count FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket=?",
-                    (user_id, screen, bucket),
-                ).fetchone()
-                count = (row["attempt_count"] if row else 0) + 1
-                if row:
-                    db.execute(
-                        "UPDATE refresh_attempts SET attempt_count=? WHERE user_id=? AND screen=? AND minute_bucket=?",
-                        (count, user_id, screen, bucket),
-                    )
-                else:
-                    db.execute(
-                        "INSERT INTO refresh_attempts (user_id,screen,minute_bucket,attempt_count) VALUES (?,?,?,?)",
-                        (user_id, screen, bucket, count),
-                    )
-
-                rolling = db.execute(
-                    "SELECT COALESCE(SUM(attempt_count),0) FROM refresh_attempts WHERE user_id=? AND screen=? AND minute_bucket IN (?,?)",
-                    (user_id, screen, bucket, previous_bucket),
-                ).fetchone()[0]
-                if rolling > 30:
-                    log_risk("excessive_refresh", f"screen={screen}, count_60s={rolling}", user_id)
-                    db.commit()
-                    return jsonify({"error": "Refresh rate exceeded", "retry_after_seconds": 10}), 429
-
-            db = get_db()
-            cleanup_expired_holds(db)
-            db.commit()
-
-    @app.get("/")
-    def root():
-        if session.get("user_id"):
-            return redirect(url_for("dashboard"))
-        return redirect(url_for("login"))
-
-    @app.route("/login", methods=["GET", "POST"])
-    def login():
-        if request.method == "GET":
-            return render_template("login.html")
-
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        if not user:
-            flash("Invalid credentials", "error")
-            return redirect(url_for("login"))
-
-        if user["lockout_until"] and from_iso(user["lockout_until"]) > utc_now():
-            flash("Account temporarily locked for 15 minutes", "error")
-            return redirect(url_for("login"))
-
-        if not check_password_hash(user["password_hash"], password):
-            failed = user["failed_attempts"] + 1
-            lockout_until = None
-            if failed >= 5:
-                lockout_until = to_iso(utc_now() + timedelta(minutes=15))
-                log_risk("failed_login_lockout", f"username={username}", user["id"])
-                failed = 0
-            db.execute(
-                "UPDATE users SET failed_attempts=?, lockout_until=? WHERE id=?",
-                (failed, lockout_until, user["id"]),
-            )
-            db.commit()
-            flash("Invalid credentials", "error")
-            return redirect(url_for("login"))
-
-        db.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL WHERE id=?", (user["id"],))
-        db.commit()
-        session.clear()
-        session["user_id"] = user["id"]
-        session["last_seen"] = to_iso(utc_now())
-        session["csrf_token"] = secrets.token_urlsafe(32)
-        session.permanent = True
-        return redirect(url_for("dashboard"))
-
-    @app.post("/logout")
-    @login_required
-    def logout():
-        session.clear()
-        return redirect(url_for("login"))
-
-    @app.post("/admin/users")
-    @login_required
-    @require_permission("admin:all")
-    def admin_create_user():
-        payload = request.get_json(force=True)
-        username = (payload.get("username") or "").strip()
-        password = payload.get("password") or ""
-        role = payload.get("role") or "employee"
-        depot_assignment = payload.get("depot_assignment") or "Unassigned"
-        if not username:
-            return jsonify({"error": "Username required"}), 422
-        if role not in {"employee", "supervisor", "hr", "admin"}:
-            return jsonify({"error": "Invalid role"}), 422
-        policy_error = password_policy_error(password)
-        if policy_error:
-            return jsonify({"error": policy_error}), 422
-        db = get_db()
-        exists = db.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone()
-        if exists:
-            return jsonify({"error": "Username already exists"}), 409
-        db.execute(
-            "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
-            (username, generate_password_hash(password), role, depot_assignment, to_iso(utc_now())),
-        )
-        db.commit()
-        return jsonify({"ok": True}), 201
-
-    @app.get("/api/config/booking-rules")
-    @login_required
-    @require_permission("config:manage")
-    def get_booking_rules_config():
-        return jsonify(booking_rule_values(get_db()))
-
-    @app.post("/api/config/booking-rules")
-    @login_required
-    @require_permission("config:manage")
-    def update_booking_rules_config():
-        payload = request.get_json(silent=True)
-        if payload is None:
-            return jsonify({"error": "Invalid JSON payload"}), 400
-
-        allowed_keys = {
-            "booking_min_advance_hours": (1, 168),
-            "booking_max_horizon_days": (1, 365),
-            "commuter_bundle_min_days": (1, 30),
-            "seat_hold_timeout_minutes": (1, 120),
-        }
-
-        db = get_db()
-        now_iso = to_iso(utc_now())
-        changed = 0
-        for key, (min_v, max_v) in allowed_keys.items():
-            if key not in payload:
-                continue
-            try:
-                new_value = int(payload[key])
-            except (TypeError, ValueError):
-                return jsonify({"error": f"Invalid integer for {key}"}), 422
-            if new_value < min_v or new_value > max_v:
-                return jsonify({"error": f"{key} must be between {min_v} and {max_v}"}), 422
-
-            old_row = db.execute("SELECT value FROM system_config WHERE key=?", (key,)).fetchone()
-            old_value = old_row["value"] if old_row else None
-            db.execute(
-                "INSERT INTO system_config (key,value,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-                (key, str(new_value), now_iso, session["user_id"]),
-            )
-            db.execute(
-                "INSERT INTO config_audit_log (key,old_value,new_value,changed_by,changed_at,reason) VALUES (?,?,?,?,?,?)",
-                (key, old_value, str(new_value), session["user_id"], now_iso, "booking_rule_update"),
-            )
-            changed += 1
-
-        if changed == 0:
-            return jsonify({"error": "No supported config keys supplied"}), 422
-        db.commit()
-        return jsonify({"ok": True, "rules": booking_rule_values(db)})
-
-    @app.get("/dashboard")
-    @login_required
-    def dashboard():
-        user = current_user()
-        routes = get_db().execute("SELECT * FROM routes ORDER BY code").fetchall()
-        departures = get_db().execute(
-            "SELECT d.id, r.code, d.departure_time FROM departures d JOIN routes r ON r.id=d.route_id ORDER BY d.departure_time LIMIT 10"
-        ).fetchall()
-        return render_template("dashboard.html", user=user, routes=routes, departures=departures)
-
-    @app.get("/reports")
-    @login_required
-    @require_permission("reports:view")
-    def reports_index():
-        db = get_db()
-        now = utc_now()
-        since = to_iso(now - timedelta(days=7))
-        risk_rows = db.execute(
-            """
-            SELECT event_type, COUNT(*) AS total
-            FROM risk_events
-            WHERE created_at >= ?
-            GROUP BY event_type
-            ORDER BY total DESC
-            """,
-            (since,),
-        ).fetchall()
-        login_lockouts = db.execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='failed_login_lockout' AND created_at >= ?",
-            (since,),
-        ).fetchone()[0]
-        refresh_limits = db.execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='excessive_refresh' AND created_at >= ?",
-            (since,),
-        ).fetchone()[0]
-        speed_anomalies = db.execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND created_at >= ?",
-            (since,),
-        ).fetchone()[0]
-        return render_template(
-            "reports.html",
-            risk_rows=risk_rows,
-            login_lockouts=login_lockouts,
-            refresh_limits=refresh_limits,
-            speed_anomalies=speed_anomalies,
-            generated_at=format_clock(now),
-        )
-
-    @app.get("/kiosk")
-    def kiosk():
-        routes = get_db().execute("SELECT * FROM routes ORDER BY code").fetchall()
-        return render_template("kiosk.html", routes=routes)
+    register_core_routes(
+        app,
+        {
+            "login_required": login_required,
+            "require_permission": require_permission,
+            "get_db": get_db,
+            "current_user": current_user,
+            "utc_now": utc_now,
+            "to_iso": to_iso,
+            "from_iso": from_iso,
+            "format_clock": format_clock,
+            "log_risk": log_risk,
+            "password_policy_error": password_policy_error,
+            "booking_rule_values": booking_rule_values,
+        },
+    )
 
     register_ops_routes(
         app,

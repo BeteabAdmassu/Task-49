@@ -27,7 +27,7 @@
     </label>
     <label>Bundle Days <input id="booking-bundle-days" type="number" min="1" value="1"></label>
     <label>Contact <input id="booking-contact" placeholder="email or phone"></label>
-    <button onclick="startHold()">Hold Seat (8 min)</button>
+    <button onclick="startHold()">Hold Seat ({{ hold_timeout_minutes }} min)</button>
     <div id="booking-status" class="hint"></div>
     <button id="confirm-booking-btn" onclick="confirmBooking()" disabled>Confirm Booking</button>
   </div>

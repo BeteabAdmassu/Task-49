@@ -11,10 +11,12 @@ COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-RUN mkdir -p /app/data/attachments && chown -R metroops:metroops /app
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && mkdir -p /app/data/attachments && chown -R metroops:metroops /app
 
 USER metroops
 
 EXPOSE 5000
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "-m", "app.app"]

@@ -8,3 +8,4 @@ data/*.sqlite3
 data/*.key
 data/attachments/*
 !data/attachments/.keep
+.env

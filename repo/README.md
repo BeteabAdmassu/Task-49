@@ -6,11 +6,13 @@ Offline-first Flask + HTMX portal for reservations, service visibility, depot lo
 
 From the project root (the folder that contains `docker-compose.yml`), start everything with:
 
-1. Set a strong gateway token in your shell (required by compose, do not use placeholder values):
+1. Optional (recommended for consistency): create `.env` from `.env.example` and adjust values.
 
-```bash
-set METROOPS_GATEWAY_TOKEN=use-a-long-random-token
-```
+Windows CMD: `copy .env.example .env`
+
+PowerShell: `Copy-Item .env.example .env`
+
+macOS/Linux: `cp .env.example .env`
 
 2. Start all services:
 
@@ -18,7 +20,7 @@ set METROOPS_GATEWAY_TOKEN=use-a-long-random-token
 docker compose up
 ```
 
-This single command builds and starts the full stack with no manual dependency setup.
+This single command builds and starts the full stack with no manual dependency setup. In development runtime, a local gateway token is auto-generated if not provided.
 
 ## Services and Ports
 
@@ -53,9 +55,27 @@ python -m app.app
 
 If you need to run local HTTP (non-TLS) for development-only testing, explicitly set development runtime mode before disabling TLS enforcement:
 
-```bash
+Windows CMD:
+
+```bat
 set METROOPS_RUNTIME_ENV=development
 set DISABLE_TLS_ENFORCEMENT=1
+python -m app.app
+```
+
+PowerShell:
+
+```powershell
+$env:METROOPS_RUNTIME_ENV='development'
+$env:DISABLE_TLS_ENFORCEMENT='1'
+python -m app.app
+```
+
+macOS/Linux:
+
+```bash
+export METROOPS_RUNTIME_ENV=development
+export DISABLE_TLS_ENFORCEMENT=1
 python -m app.app
 ```
 
@@ -99,9 +119,11 @@ set FLASK_DEBUG=1
 
 Set a non-default gateway token in your environment before enabling LAN ingest:
 
-```bash
-set METROOPS_GATEWAY_TOKEN=your-strong-local-token
-```
+Windows CMD: `set METROOPS_GATEWAY_TOKEN=your-strong-local-token`
+
+PowerShell: `$env:METROOPS_GATEWAY_TOKEN='your-strong-local-token'`
+
+macOS/Linux: `export METROOPS_GATEWAY_TOKEN='your-strong-local-token'`
 
 If `METROOPS_GATEWAY_TOKEN` is missing or placeholder-like (for example `replace-me-for-production`), startup logs a warning and LAN gateway ingestion stays disabled.
 - HTMX is vendored locally in `app/static/vendor/htmx.min.js` for offline operation.
@@ -135,6 +157,7 @@ Booking rules are DB-backed and audit-logged (`config_audit_log`) with safe defa
 4. In `/depot/manage`, use **Freeze or Unfreeze Bin** for bin `1`, then run **Allocate Inventory** for the same bin and confirm status messages appear and tables refresh.
 5. Confirm allocation fails when bin is frozen and succeeds after unfreezing.
 6. Open `/notes`, confirm Cross-Task Rollups section loads from `/api/notes/rollup`.
+7. Open `/kiosk` and confirm the hold button label reflects current policy (for example `Hold Seat (8 min)` or updated configured value).
 
 ## Non-Docker Verification for New Depot Controls
 
@@ -200,6 +223,9 @@ python -m app.app
 - Database bootstrap and migration logic moved to `app/db_bootstrap.py` to reduce `app.py` coupling.
 - Collaboration/knowledge routes (notes, social, experiments, metrics) moved to `app/routes_collab.py`.
 - Operations routes (arrival board, booking, kiosk booking, depot inventory, ping ingest) moved to `app/routes_ops.py`.
+- Core web/auth/config/reporting routes are modularized in `app/core_routes.py`.
+- Security request guards (TLS, CSRF, session timeout, refresh throttling) are modularized in `app/security_middleware.py`.
+- Runtime policy and env validation helpers are centralized in `app/config.py`.
 - Runtime cache/artifact files are ignored via `.gitignore` at the repository root.
 
 ## Tests
