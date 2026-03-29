@@ -124,7 +124,7 @@ def test_excessive_refresh_generates_risk_event(tmp_path):
         with app.app_context():
             app.get_db().execute(
                 "UPDATE refresh_cadence SET last_seen=? WHERE actor_key=? AND screen=?",
-                ((datetime.now(UTC) - timedelta(seconds=11)).isoformat(), "user:1", "dashboard"),
+                ((datetime.now(UTC) - timedelta(seconds=11)).isoformat(), "user:1", "heartbeat"),
             )
             app.get_db().commit()
 
@@ -138,7 +138,7 @@ def test_excessive_refresh_generates_risk_event(tmp_path):
         assert count >= 1
 
     other_screen = client.get("/api/heartbeat?screen=kiosk")
-    assert other_screen.status_code == 200
+    assert other_screen.status_code == 429
 
 
 def test_strict_ten_second_refresh_cap(tmp_path):
@@ -147,6 +147,16 @@ def test_strict_ten_second_refresh_cap(tmp_path):
     first = client.get("/api/heartbeat?screen=dashboard")
     assert first.status_code == 200
     second = client.get("/api/heartbeat?screen=dashboard")
+    assert second.status_code == 429
+
+
+def test_refresh_governance_not_bypassable_by_rotating_screen_query(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    first = client.get("/api/heartbeat?screen=alpha")
+    assert first.status_code == 200
+    second = client.get("/api/heartbeat?screen=beta")
     assert second.status_code == 429
 
 
@@ -197,6 +207,90 @@ def test_dashboard_recommendation_widget_telemetry_hooks_present(tmp_path):
     assert "rec_click" in body
 
 
+def test_dashboard_social_actions_ui_and_wiring_present(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    page = client.get("/dashboard")
+    assert page.status_code == 200
+    assert b'id="social-actions-panel"' in page.data
+    assert b'id="social-target-user-id"' in page.data
+    assert b'id="social-relation"' in page.data
+    assert b'data-social-action' in page.data
+    assert b'id="social-action-status"' in page.data
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    body = js.get_data(as_text=True)
+    assert "initSocialActionPanel" in body
+    assert "/api/social/action" in body
+    assert "Submitting social action..." in body
+
+
+def test_profile_social_actions_ui_state_and_mutual_follow_visibility(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    page_before = client.get("/profiles/2")
+    assert page_before.status_code == 200
+    assert b'id="profile-social-actions"' in page_before.data
+    assert b'id="profile-social-follow"' in page_before.data
+    assert b"Follow" in page_before.data
+    assert b"Mutual follow required" in page_before.data
+
+    follow = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    assert follow.status_code == 200
+
+    login_supervisor(client)
+    follow_back = authed_post(client, "/api/social/action", json={"target_user_id": 1, "relation": "follow"})
+    assert follow_back.status_code == 200
+
+    login_agent(client)
+    page_after = client.get("/profiles/2")
+    assert page_after.status_code == 200
+    assert b"Unfollow" in page_after.data
+    assert b"Mutual follow active" in page_after.data
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    body = js.get_data(as_text=True)
+    assert "initProfileSocialActions" in body
+    assert "Submitting '" in body
+
+
+def test_profile_social_actions_unauthorized_and_validation_failures(tmp_path):
+    client, _app = build_client(tmp_path)
+
+    unauth = client.post("/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    assert unauth.status_code == 302
+
+    login_agent(client)
+    invalid_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
+    assert invalid_relation.status_code == 422
+
+    missing_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2})
+    assert missing_relation.status_code == 422
+
+    missing_target = authed_post(client, "/api/social/action", json={"target_user_id": 999999, "relation": "follow"})
+    assert missing_target.status_code == 404
+
+
+def test_profile_social_duplicate_click_protection_idempotent_follow(tmp_path):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    first = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    second = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    with app.app_context():
+        count = app.get_db().execute(
+            "SELECT COUNT(*) FROM relationships WHERE user_a=1 AND user_b=2 AND relation='follow'"
+        ).fetchone()[0]
+        assert count == 1
+
+
 def test_offline_banner_contract_server_and_client_paths(tmp_path):
     client, _app = build_client(tmp_path)
 
@@ -228,7 +322,8 @@ def test_depot_mutation_requires_permission(tmp_path):
     assert denied.status_code == 403
 
     login_supervisor(client)
-    allowed = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
+    nonce_for_freeze = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    allowed = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1", "request_nonce": nonce_for_freeze})
     assert allowed.status_code == 200
 
     nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
@@ -245,7 +340,8 @@ def test_depot_mutation_requires_permission(tmp_path):
     )
     assert allocate.status_code == 409
 
-    freeze_back = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0"})
+    freeze_back_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    freeze_back = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": freeze_back_nonce})
     assert freeze_back.status_code == 200
     nonce2 = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
     frozen_then_allocate = authed_post(
@@ -261,8 +357,26 @@ def test_depot_mutation_requires_permission(tmp_path):
     )
     assert frozen_then_allocate.status_code == 200
 
-    missing_bin = authed_post(client, "/api/depot/bins/999999/freeze", data={"frozen": "1"})
+    missing_bin_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    missing_bin = authed_post(client, "/api/depot/bins/999999/freeze", data={"frozen": "1", "request_nonce": missing_bin_nonce})
     assert missing_bin.status_code == 404
+
+
+def test_privileged_endpoints_deny_employee_role(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    assert client.get("/supervisor/experiments").status_code == 403
+    assert client.get("/analyst/metrics").status_code == 403
+    assert client.get("/depot/manage").status_code == 403
+    assert client.get("/reports").status_code == 403
+
+    denied_admin = authed_post(
+        client,
+        "/admin/users",
+        json={"username": "x", "password": "LongEnoughPass!123", "role": "employee", "depot_assignment": "Main"},
+    )
+    assert denied_admin.status_code == 403
 
 
 def test_depot_hierarchy_management_crud_and_validation(tmp_path):
@@ -339,11 +453,30 @@ def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
     client, app = build_client(tmp_path)
     login_supervisor(client)
 
-    invalid_freeze = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "bad"})
-    assert invalid_freeze.status_code == 422
+    missing_nonce = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
+    assert missing_nonce.status_code == 409
 
-    frozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
+    invalid_freeze = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "bad"})
+    assert invalid_freeze.status_code == 409
+
+    nonce_for_freeze = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    invalid_freeze_with_nonce = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "bad", "request_nonce": nonce_for_freeze},
+    )
+    assert invalid_freeze_with_nonce.status_code == 422
+
+    freeze_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    frozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1", "request_nonce": freeze_nonce})
     assert frozen.status_code == 200
+
+    replay = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": freeze_nonce})
+    assert replay.status_code == 409
+
+    booking_nonce = authed_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    cross_action = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": booking_nonce})
+    assert cross_action.status_code == 409
 
     nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
     blocked_allocate = authed_post(
@@ -359,7 +492,8 @@ def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
     )
     assert blocked_allocate.status_code == 409
 
-    unfrozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0"})
+    thaw_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    unfrozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": thaw_nonce})
     assert unfrozen.status_code == 200
 
     nonce_ok = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
@@ -427,10 +561,17 @@ def test_kiosk_booking_hold_and_confirm(tmp_path):
 
     hold = client.post(
         "/api/kiosk/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "single",
+            "bundle_days": 1,
+            "kiosk_session_id": "ks-test-001",
+        },
     )
     assert hold.status_code == 200
     hold_nonce = hold.get_json()["hold_nonce"]
+    assert hold.get_json()["kiosk_session_id"] == "ks-test-001"
 
     nonce = client.post("/api/kiosk/security/nonce", data={"action": "booking_confirm"})
     assert nonce.status_code == 200
@@ -441,10 +582,69 @@ def test_kiosk_booking_hold_and_confirm(tmp_path):
             "hold_nonce": hold_nonce,
             "request_nonce": nonce.get_json()["nonce"],
             "contact": "kiosk@rider.local",
+            "kiosk_session_id": "ks-test-001",
         },
     )
     assert confirm.status_code == 200
     assert confirm.get_json()["ok"] is True
+    assert confirm.get_json()["kiosk_session_id"] == "ks-test-001"
+
+    with app.app_context():
+        db = app.get_db()
+        hold_row = db.execute("SELECT kiosk_session_id,status FROM seat_holds WHERE nonce=?", (hold_nonce,)).fetchone()
+        booking_row = db.execute(
+            "SELECT kiosk_session_id FROM bookings WHERE user_id=(SELECT id FROM users WHERE username='kiosk_rider') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        event_row = db.execute(
+            "SELECT metadata FROM analytics_events WHERE event_type='booking_confirmed' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert hold_row["kiosk_session_id"] == "ks-test-001"
+        assert hold_row["status"] == "converted"
+        assert booking_row["kiosk_session_id"] == "ks-test-001"
+        assert "ks-test-001" in event_row["metadata"]
+
+
+def test_kiosk_session_id_fallback_generated_and_propagated(tmp_path):
+    client, app = build_client(tmp_path)
+
+    with app.app_context():
+        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        app.get_db().execute(
+            "UPDATE departures SET departure_time=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
+        )
+        app.get_db().commit()
+
+    hold = client.post(
+        "/api/kiosk/bookings/hold",
+        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+    )
+    assert hold.status_code == 200
+    payload = hold.get_json()
+    assert payload["kiosk_session_id"]
+    generated_session = payload["kiosk_session_id"]
+    hold_nonce = payload["hold_nonce"]
+
+    nonce = client.post("/api/kiosk/security/nonce", data={"action": "booking_confirm"})
+    assert nonce.status_code == 200
+
+    confirm = client.post(
+        "/api/kiosk/bookings/confirm",
+        json={
+            "hold_nonce": hold_nonce,
+            "request_nonce": nonce.get_json()["nonce"],
+            "contact": "fallback@rider.local",
+        },
+    )
+    assert confirm.status_code == 200
+    assert confirm.get_json()["kiosk_session_id"] == generated_session
+
+    with app.app_context():
+        booking_row = app.get_db().execute(
+            "SELECT kiosk_session_id FROM bookings WHERE nonce_used=?",
+            (nonce.get_json()["nonce"],),
+        ).fetchone()
+        assert booking_row["kiosk_session_id"] == generated_session
 
 
 def test_notes_depot_scope_isolation(tmp_path):
@@ -532,10 +732,28 @@ def test_admin_user_create_enforces_password_policy(tmp_path):
 
 
 def test_session_cookie_security_flags_present_on_login(tmp_path):
-    client, _app = build_client(tmp_path)
+    previous = {
+        "METROOPS_DB_PATH": os.environ.get("METROOPS_DB_PATH"),
+        "METROOPS_KEY_PATH": os.environ.get("METROOPS_KEY_PATH"),
+        "METROOPS_RUNTIME_ENV": os.environ.get("METROOPS_RUNTIME_ENV"),
+        "DISABLE_TLS_ENFORCEMENT": os.environ.get("DISABLE_TLS_ENFORCEMENT"),
+        "SESSION_COOKIE_SECURE": os.environ.get("SESSION_COOKIE_SECURE"),
+    }
+    os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_cookie.db")
+    os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_cookie.key")
+    os.environ["METROOPS_RUNTIME_ENV"] = "test"
+    os.environ["DISABLE_TLS_ENFORCEMENT"] = "0"
+    os.environ["SESSION_COOKIE_SECURE"] = "1"
+    module = importlib.import_module("app.app")
+    module = importlib.reload(module)
+    app = module.create_app()
+    app.testing = False
+    app.init_db()
+    client = app.test_client()
     response = client.post(
         "/login",
         data={"username": "agent01", "password": "MetroOpsPass!01"},
+        base_url="https://localhost",
         follow_redirects=False,
     )
     assert response.status_code == 302
@@ -543,12 +761,53 @@ def test_session_cookie_security_flags_present_on_login(tmp_path):
     assert "Secure" in cookie
     assert "HttpOnly" in cookie
     assert "SameSite=Lax" in cookie
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def test_development_http_mode_forces_non_secure_cookie_and_session_continuity(tmp_path):
+    previous = {
+        "METROOPS_DB_PATH": os.environ.get("METROOPS_DB_PATH"),
+        "METROOPS_KEY_PATH": os.environ.get("METROOPS_KEY_PATH"),
+        "METROOPS_RUNTIME_ENV": os.environ.get("METROOPS_RUNTIME_ENV"),
+        "DISABLE_TLS_ENFORCEMENT": os.environ.get("DISABLE_TLS_ENFORCEMENT"),
+        "SESSION_COOKIE_SECURE": os.environ.get("SESSION_COOKIE_SECURE"),
+    }
+    try:
+        os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_http_dev.db")
+        os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_http_dev.key")
+        os.environ["METROOPS_RUNTIME_ENV"] = "development"
+        os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
+        os.environ["SESSION_COOKIE_SECURE"] = "1"
+        module = importlib.import_module("app.app")
+        module = importlib.reload(module)
+        app = module.create_app()
+        app.testing = False
+        app.init_db()
+        client = app.test_client()
+
+        login = client.post("/login", data={"username": "agent01", "password": "MetroOpsPass!01"}, follow_redirects=False)
+        assert login.status_code == 302
+        cookie = login.headers.get("Set-Cookie", "")
+        assert "Secure" not in cookie
+
+        dashboard = client.get("/dashboard")
+        assert dashboard.status_code == 200
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_tls.db")
     os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_tls.key")
-    os.environ["METROOPS_RUNTIME_ENV"] = "production"
+    os.environ["METROOPS_RUNTIME_ENV"] = "test"
     os.environ["DISABLE_TLS_ENFORCEMENT"] = "0"
     module = importlib.import_module("app.app")
     module = importlib.reload(module)
@@ -610,11 +869,13 @@ def test_production_runtime_rejects_tls_disable_startup(tmp_path):
         "DISABLE_TLS_ENFORCEMENT": os.environ.get("DISABLE_TLS_ENFORCEMENT"),
         "METROOPS_DB_PATH": os.environ.get("METROOPS_DB_PATH"),
         "METROOPS_KEY_PATH": os.environ.get("METROOPS_KEY_PATH"),
+        "FLASK_SECRET": os.environ.get("FLASK_SECRET"),
     }
     try:
         os.environ["METROOPS_DB_PATH"] = str(tmp_path / "metroops_tls_policy_prod.db")
         os.environ["METROOPS_KEY_PATH"] = str(tmp_path / "metroops_tls_policy_prod.key")
         os.environ["METROOPS_RUNTIME_ENV"] = "production"
+        os.environ["FLASK_SECRET"] = "prod-test-secret"
         os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
 
         module = importlib.import_module("app.app")

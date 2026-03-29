@@ -23,6 +23,15 @@ def register_ops_routes(app, ctx):
     ensure_kiosk_user_id = ctx["ensure_kiosk_user_id"]
     gateway_token = app.config.get("GATEWAY_TOKEN", "")
 
+    def kiosk_session_id_from_payload(payload):
+        raw = payload.get("kiosk_session_id") if isinstance(payload, dict) else None
+        if raw is not None:
+            value = str(raw).strip()
+            if value:
+                return value[:64]
+        generated = secrets.token_urlsafe(12)
+        return generated[:64]
+
     def allowed_rule_values(db, rule_type):
         rows = db.execute(
             "SELECT rule_value FROM depot_bin_rules WHERE rule_type=? AND is_active=1",
@@ -298,10 +307,14 @@ def register_ops_routes(app, ctx):
         payload, error = json_payload_or_400()
         if error:
             return error
+        kiosk_session_id = kiosk_session_id_from_payload(payload)
+        payload["kiosk_session_id"] = kiosk_session_id
         kiosk_user_id = ensure_kiosk_user_id(get_db())
         response, error, status = create_booking_hold_for_user(kiosk_user_id, payload)
         if error:
             return jsonify(error), status
+        if isinstance(response, dict) and "kiosk_session_id" not in response:
+            response["kiosk_session_id"] = kiosk_session_id
         return jsonify(response), status
 
     @app.post("/api/kiosk/bookings/confirm")
@@ -315,10 +328,20 @@ def register_ops_routes(app, ctx):
         hold_nonce = payload.get("hold_nonce")
         request_nonce = payload.get("request_nonce")
         contact = payload.get("contact", "")
+        kiosk_session_id = kiosk_session_id_from_payload(payload)
+        if hold_nonce and kiosk_session_id:
+            db = get_db()
+            db.execute(
+                "UPDATE seat_holds SET kiosk_session_id=COALESCE(kiosk_session_id,?) WHERE nonce=?",
+                (kiosk_session_id, hold_nonce),
+            )
+            db.commit()
         kiosk_user_id = ensure_kiosk_user_id(get_db())
         response, error, status = confirm_booking_for_user(kiosk_user_id, hold_nonce, request_nonce, contact)
         if error:
             return jsonify(error), status
+        if isinstance(response, dict) and not response.get("kiosk_session_id"):
+            response["kiosk_session_id"] = kiosk_session_id
         return jsonify(response), status
 
     @app.post("/api/vehicle-pings/upload")
@@ -381,6 +404,10 @@ def register_ops_routes(app, ctx):
     @login_required
     @require_permission("depot:manage")
     def freeze_bin(bin_id):
+        request_nonce = request.form.get("request_nonce")
+        ok, msg = assert_nonce(session["user_id"], "inventory_adjust", request_nonce)
+        if not ok:
+            return jsonify({"error": msg}), 409
         try:
             frozen = int(request.form.get("frozen", "1"))
         except (TypeError, ValueError):

@@ -45,6 +45,7 @@
 
 <script>
   let activeHoldNonce = null;
+  let kioskSessionId = null;
   let holdDeadlineMs = null;
   let countdownTimer = null;
 
@@ -74,6 +75,7 @@
       seats: Number(document.getElementById("booking-seats").value || 1),
       product_type: document.getElementById("booking-product-type").value,
       bundle_days: Number(document.getElementById("booking-bundle-days").value || 1),
+      kiosk_session_id: kioskSessionId,
     };
     const response = await fetch("/api/kiosk/bookings/hold", {
       method: "POST",
@@ -88,6 +90,7 @@
     }
 
     activeHoldNonce = data.hold_nonce;
+    kioskSessionId = data.kiosk_session_id || kioskSessionId;
     holdDeadlineMs = Date.parse(data.expires_at);
     document.getElementById("confirm-booking-btn").disabled = false;
     startCountdown();
@@ -117,6 +120,7 @@
         hold_nonce: activeHoldNonce,
         request_nonce: nonceData.nonce,
         contact: document.getElementById("booking-contact").value,
+        kiosk_session_id: kioskSessionId,
       }),
     });
     const confirmData = await confirmRes.json();
@@ -126,6 +130,7 @@
     }
 
     activeHoldNonce = null;
+    kioskSessionId = confirmData.kiosk_session_id || kioskSessionId;
     document.getElementById("confirm-booking-btn").disabled = true;
     if (countdownTimer) clearInterval(countdownTimer);
     setBookingStatus(`Booking confirmed. Total: $${confirmData.total_price}`);

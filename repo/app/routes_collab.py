@@ -362,6 +362,20 @@ def register_collab_routes(app, ctx):
             (owner["id"], viewer),
         ).fetchone()
         mutual = bool(follow_a and follow_b)
+        relations = {
+            row[0]
+            for row in db.execute(
+                "SELECT relation FROM relationships WHERE user_a=? AND user_b=? AND relation IN ('follow','favorite','like','block','report')",
+                (viewer, owner["id"]),
+            ).fetchall()
+        }
+        relation_state = {
+            "following": "follow" in relations,
+            "favorited": "favorite" in relations,
+            "liked": "like" in relations,
+            "blocked": "block" in relations,
+            "reported": "report" in relations,
+        }
         masked_face = ""
         if owner["face_identifier_encrypted"]:
             raw = app.fernet.decrypt(owner["face_identifier_encrypted"]).decode("utf-8")
@@ -371,7 +385,14 @@ def register_collab_routes(app, ctx):
                 owner["id"],
                 face_identifier_log_value(raw),
             )
-        return render_template("profile.html", owner=owner, mutual=mutual, masked_face=masked_face)
+        return render_template(
+            "profile.html",
+            owner=owner,
+            mutual=mutual,
+            masked_face=masked_face,
+            viewer_id=viewer,
+            relation_state=relation_state,
+        )
 
     def assign_variant(user_id, experiment_id):
         hash_key = hashlib.sha256(f"{user_id}:{experiment_id}".encode("utf-8")).hexdigest()

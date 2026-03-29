@@ -124,3 +124,118 @@ function initRecommendationWidgetTelemetry() {
 }
 
 initRecommendationWidgetTelemetry();
+
+async function submitSocialAction(targetUserId, relation) {
+  const response = await fetch("/api/social/action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      target_user_id: targetUserId,
+      relation,
+    }),
+    credentials: "same-origin",
+  });
+
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (_err) {
+    payload = {};
+  }
+  return { response, payload };
+}
+
+function initSocialActionPanel() {
+  const panel = document.getElementById("social-actions-panel");
+  if (!panel) return;
+
+  const targetInput = document.getElementById("social-target-user-id");
+  const relationInput = document.getElementById("social-relation");
+  const button = document.getElementById("social-action-button");
+  const status = document.getElementById("social-action-status");
+  if (!targetInput || !relationInput || !button || !status) return;
+
+  button.addEventListener("click", async () => {
+    const targetUserId = Number(targetInput.value);
+    const relation = relationInput.value;
+    if (!targetUserId) {
+      status.textContent = "Target User ID is required.";
+      return;
+    }
+
+    button.disabled = true;
+    status.textContent = "Submitting social action...";
+    try {
+      const { response, payload } = await submitSocialAction(targetUserId, relation);
+      if (response.ok) {
+        status.textContent = `Action '${relation}' saved for user ${targetUserId}.`;
+      } else {
+        status.textContent = payload.error || "Social action failed.";
+      }
+    } catch (_err) {
+      status.textContent = "Network error while submitting social action.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+initSocialActionPanel();
+
+function setProfileSocialButtonLabel(button, relation) {
+  if (!button) return;
+  if (relation === "follow") button.textContent = "Unfollow";
+  if (relation === "unfollow") button.textContent = "Follow";
+  if (relation === "favorite") button.textContent = "Favorited";
+  if (relation === "like") button.textContent = "Liked";
+  if (relation === "block") button.textContent = "Blocked";
+  if (relation === "report") button.textContent = "Reported";
+}
+
+function initProfileSocialActions() {
+  const panel = document.getElementById("profile-social-actions");
+  if (!panel) return;
+
+  const status = document.getElementById("profile-social-status");
+  const targetUserId = Number(panel.dataset.targetUserId || "0");
+  const buttons = Array.from(panel.querySelectorAll("[data-social-profile-action]"));
+  if (!status || !targetUserId || !buttons.length) return;
+
+  let submitting = false;
+  buttons.forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (submitting) return;
+      const relation = button.dataset.relation || "";
+      if (!relation) return;
+
+      submitting = true;
+      buttons.forEach((b) => {
+        b.disabled = true;
+      });
+      status.textContent = `Submitting '${relation}'...`;
+      try {
+        const { response, payload } = await submitSocialAction(targetUserId, relation);
+        if (!response.ok) {
+          status.textContent = payload.error || "Social action failed.";
+          return;
+        }
+        setProfileSocialButtonLabel(button, relation);
+        if (relation === "follow") {
+          button.dataset.relation = "unfollow";
+        } else if (relation === "unfollow") {
+          button.dataset.relation = "follow";
+        }
+        status.textContent = `Action '${relation}' saved.`;
+      } catch (_err) {
+        status.textContent = "Network error while submitting social action.";
+      } finally {
+        submitting = false;
+        buttons.forEach((b) => {
+          b.disabled = false;
+        });
+      }
+    });
+  });
+}
+
+initProfileSocialActions();

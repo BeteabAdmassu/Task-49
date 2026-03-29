@@ -88,11 +88,24 @@ def load_fernet():
 def create_app():
     app = Flask(__name__, template_folder="templates", static_folder="static")
     runtime_env, tls_disable = resolve_tls_disable_policy(os.environ.get("DISABLE_TLS_ENFORCEMENT", "0"))
-    app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
+    development_mode = runtime_env in {"development", "dev", "local", "test", "testing"}
+    configured_secret = os.environ.get("FLASK_SECRET")
+    if not development_mode and not configured_secret:
+        raise RuntimeError("FLASK_SECRET must be explicitly set in non-development runtime")
+    app.config["SECRET_KEY"] = configured_secret or secrets.token_hex(32)
     app.config["RUNTIME_ENV"] = runtime_env
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=30)
-    app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "1") == "1"
+    session_cookie_secure = os.environ.get("SESSION_COOKIE_SECURE", "1") == "1"
+    if tls_disable and session_cookie_secure:
+        app.logger.warning(
+            "SESSION_COOKIE_SECURE forced to 0 because TLS enforcement is disabled for %s runtime",
+            runtime_env,
+        )
+        session_cookie_secure = False
+    if not development_mode and not session_cookie_secure:
+        raise RuntimeError("SESSION_COOKIE_SECURE must be enabled in non-development runtime")
+    app.config["SESSION_COOKIE_SECURE"] = session_cookie_secure
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
     app.config["TLS_REQUIRED"] = True
@@ -112,6 +125,14 @@ def create_app():
             "TLS enforcement disabled for %s runtime; use this only for local development/testing",
             runtime_env,
         )
+    app.logger.info(
+        "startup_security runtime_env=%s tls_required=%s tls_disabled=%s session_cookie_secure=%s csrf_protect=%s",
+        runtime_env,
+        app.config["TLS_REQUIRED"],
+        app.config["DISABLE_TLS_ENFORCEMENT"],
+        app.config["SESSION_COOKIE_SECURE"],
+        app.config["CSRF_PROTECT"],
+    )
 
     def get_db():
         if "db" not in g:
@@ -340,6 +361,11 @@ def create_app():
         except (TypeError, ValueError):
             return None, {"error": "Invalid departure_id/seats/bundle_days"}, 422
         product_type = payload.get("product_type", "single")
+        kiosk_session_id = payload.get("kiosk_session_id")
+        if kiosk_session_id:
+            kiosk_session_id = str(kiosk_session_id).strip()[:64]
+        else:
+            kiosk_session_id = None
 
         db = get_db()
         db.execute("BEGIN IMMEDIATE")
@@ -375,11 +401,12 @@ def create_app():
             hold_nonce = secrets.token_urlsafe(16)
             expires_at = to_iso(utc_now() + timedelta(minutes=rules["seat_hold_timeout_minutes"]))
             db.execute(
-                "INSERT INTO seat_holds (departure_id,user_id,seats,expires_at,status,nonce,created_at) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO seat_holds (departure_id,user_id,seats,kiosk_session_id,expires_at,status,nonce,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     departure_id,
                     user_id,
                     seats_requested,
+                    kiosk_session_id,
                     expires_at,
                     "active",
                     hold_nonce,
@@ -396,6 +423,7 @@ def create_app():
                 "hold_nonce": hold_nonce,
                 "expires_at": expires_at,
                 "seats_remaining": available_seats(get_db(), departure_id),
+                "kiosk_session_id": kiosk_session_id,
             },
             None,
             200,
@@ -427,13 +455,14 @@ def create_app():
             total = price_for_departure(db, departure, hold["seats"])
             encrypted_contact = app.fernet.encrypt(contact.encode("utf-8")) if contact else None
             db.execute(
-                "INSERT INTO bookings (departure_id,user_id,seats,total_price,status,contact_encrypted,nonce_used,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO bookings (departure_id,user_id,seats,total_price,status,kiosk_session_id,contact_encrypted,nonce_used,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     hold["departure_id"],
                     user_id,
                     hold["seats"],
                     total,
                     "confirmed",
+                    hold["kiosk_session_id"],
                     encrypted_contact,
                     request_nonce,
                     to_iso(utc_now()),
@@ -442,13 +471,23 @@ def create_app():
             db.execute("UPDATE seat_holds SET status='converted' WHERE id=?", (hold["id"],))
             db.execute(
                 "INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)",
-                (user_id, "booking_confirmed", to_iso(utc_now()), json.dumps({"departure_id": hold["departure_id"]})),
+                (
+                    user_id,
+                    "booking_confirmed",
+                    to_iso(utc_now()),
+                    json.dumps(
+                        {
+                            "departure_id": hold["departure_id"],
+                            "kiosk_session_id": hold["kiosk_session_id"],
+                        }
+                    ),
+                ),
             )
             db.commit()
         except Exception:
             db.rollback()
             raise
-        return {"ok": True, "total_price": total}, None, 200
+        return {"ok": True, "total_price": total, "kiosk_session_id": hold["kiosk_session_id"]}, None, 200
 
     def assert_nonce(user_id, action, nonce):
         row = get_db().execute(

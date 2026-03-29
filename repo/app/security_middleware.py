@@ -12,6 +12,31 @@ def register_security_guards(app, deps):
     log_risk = deps["log_risk"]
     cleanup_expired_holds = deps["cleanup_expired_holds"]
 
+    endpoint_screen_map = {
+        "heartbeat": "heartbeat",
+        "arrival_board": "arrival-board",
+        "route_distribution": "route-distribution",
+        "seat_availability_partial": "seat-availability-partial",
+        "seat_availability_query": "seat-availability-query",
+        "search_departures": "departures-search",
+    }
+
+    def canonical_refresh_screen():
+        endpoint = request.endpoint or "unknown"
+        if endpoint == "arrival_board":
+            route_id = request.args.get("route_id", type=int)
+            return f"arrival-board:route:{route_id if route_id is not None else 'all'}"
+        if endpoint == "seat_availability_query":
+            departure_id = request.args.get("departure_id", type=int)
+            return f"seat-availability-query:departure:{departure_id if departure_id is not None else 'none'}"
+        if endpoint == "seat_availability_partial":
+            departure_id = request.view_args.get("departure_id") if request.view_args else None
+            return f"seat-availability-partial:departure:{departure_id if departure_id is not None else 'none'}"
+        if endpoint in endpoint_screen_map:
+            return endpoint_screen_map[endpoint]
+        path = (request.path or "unknown").strip("/").replace("/", "-")
+        return f"path:{path or 'root'}"
+
     @app.before_request
     def security_guards():
         if (
@@ -57,7 +82,7 @@ def register_security_guards(app, deps):
         if request.endpoint in refresh_endpoints:
             now = utc_now()
             db = get_db()
-            screen = request.args.get("screen") or request.full_path
+            screen = canonical_refresh_screen()
             actor_key = (
                 f"user:{session['user_id']}"
                 if session.get("user_id")

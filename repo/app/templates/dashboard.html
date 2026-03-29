@@ -60,6 +60,28 @@
       <li><a href="{{ url_for('profile', user_id=user.id) }}">My Profile</a></li>
     </ul>
   </article>
+
+  <article class="panel" id="social-actions-panel">
+    <h2>Social Actions</h2>
+    <p class="hint">Use follow/favorite/like/block/report interactions for collaboration and moderation flows.</p>
+    <div class="stack inline">
+      <label>Target User ID
+        <input id="social-target-user-id" type="number" min="1" value="1">
+      </label>
+      <label>Action
+        <select id="social-relation">
+          <option value="follow">follow</option>
+          <option value="unfollow">unfollow</option>
+          <option value="favorite">favorite</option>
+          <option value="like">like</option>
+          <option value="block">block</option>
+          <option value="report">report</option>
+        </select>
+      </label>
+      <button id="social-action-button" data-social-action type="button">Apply Social Action</button>
+    </div>
+    <p id="social-action-status" class="hint" role="status" aria-live="polite"></p>
+  </article>
 </section>
 
 {% endblock %}

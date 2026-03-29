@@ -1,7 +1,20 @@
 import sqlite3
+import os
 from datetime import timedelta
 
 from werkzeug.security import generate_password_hash
+
+
+def runtime_env_mode():
+    raw_mode = (
+        os.environ.get("METROOPS_RUNTIME_ENV")
+        or os.environ.get("FLASK_ENV")
+        or os.environ.get("APP_ENV")
+        or "production"
+    )
+    mode = raw_mode.strip().lower()
+    development_modes = {"development", "dev", "local", "test", "testing"}
+    return mode, mode in development_modes
 
 
 SCHEMA_SQL = """
@@ -100,6 +113,7 @@ CREATE TABLE IF NOT EXISTS seat_holds (
     departure_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     seats INTEGER NOT NULL,
+    kiosk_session_id TEXT,
     expires_at TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('active','expired','converted','cancelled')),
     nonce TEXT,
@@ -114,6 +128,7 @@ CREATE TABLE IF NOT EXISTS bookings (
     seats INTEGER NOT NULL,
     total_price REAL NOT NULL,
     status TEXT NOT NULL,
+    kiosk_session_id TEXT,
     bundle_days INTEGER,
     contact_encrypted BLOB,
     nonce_used TEXT,
@@ -368,6 +383,12 @@ def _ensure_migrations(db):
     if "split_a_percent" not in experiment_cols:
         db.execute("ALTER TABLE experiments ADD COLUMN split_a_percent INTEGER NOT NULL DEFAULT 50")
     db.execute("UPDATE experiments SET split_a_percent=50 WHERE split_a_percent IS NULL")
+    seat_hold_cols = {row[1] for row in db.execute("PRAGMA table_info(seat_holds)").fetchall()}
+    if "kiosk_session_id" not in seat_hold_cols:
+        db.execute("ALTER TABLE seat_holds ADD COLUMN kiosk_session_id TEXT")
+    booking_cols = {row[1] for row in db.execute("PRAGMA table_info(bookings)").fetchall()}
+    if "kiosk_session_id" not in booking_cols:
+        db.execute("ALTER TABLE bookings ADD COLUMN kiosk_session_id TEXT")
     default_rules = [
         ("bin_type", "standard"),
         ("bin_type", "cold"),
@@ -399,6 +420,7 @@ def initialize_database(db_path, utc_now, to_iso):
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA_SQL)
     _ensure_migrations(db)
+    runtime_env, development_mode = runtime_env_mode()
 
     permissions = {
         "employee": ["notes:read", "notes:write", "booking:create", "social:use"],
@@ -430,15 +452,32 @@ def initialize_database(db_path, utc_now, to_iso):
 
     if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         now_iso = to_iso(utc_now())
-        users = [
-            ("agent01", generate_password_hash("MetroOpsPass!01"), "employee", "Main Depot"),
-            ("supervisor01", generate_password_hash("MetroOpsPass!02"), "supervisor", "Main Depot"),
-            ("hr01", generate_password_hash("MetroOpsPass!03"), "hr", "HQ"),
-            ("admin01", generate_password_hash("MetroOpsPass!04"), "admin", "HQ"),
-        ]
+        if development_mode:
+            users = [
+                ("agent01", generate_password_hash("MetroOpsPass!01"), "employee", "Main Depot"),
+                ("supervisor01", generate_password_hash("MetroOpsPass!02"), "supervisor", "Main Depot"),
+                ("hr01", generate_password_hash("MetroOpsPass!03"), "hr", "HQ"),
+                ("admin01", generate_password_hash("MetroOpsPass!04"), "admin", "HQ"),
+            ]
+            bootstrap_profile = "dev_defaults_v1"
+        else:
+            admin_username = (os.environ.get("METROOPS_BOOTSTRAP_ADMIN_USERNAME") or "admin").strip()
+            admin_password = os.environ.get("METROOPS_BOOTSTRAP_ADMIN_PASSWORD") or ""
+            if len(admin_password) < 12:
+                raise RuntimeError(
+                    "Non-development bootstrap requires METROOPS_BOOTSTRAP_ADMIN_PASSWORD with at least 12 characters"
+                )
+            users = [
+                (admin_username, generate_password_hash(admin_password), "admin", "HQ"),
+            ]
+            bootstrap_profile = "secure_bootstrap_v1"
         db.executemany(
             "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
             [(u, p, r, d, now_iso) for (u, p, r, d) in users],
+        )
+        db.execute(
+            "INSERT INTO system_config (key,value,updated_at,updated_by) VALUES (?,?,datetime('now'),NULL) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=NULL",
+            ("bootstrap_profile", bootstrap_profile),
         )
 
         db.execute("INSERT INTO routes (code,origin,destination) VALUES ('R-101','Central','North Yard')")
@@ -479,5 +518,22 @@ def initialize_database(db_path, utc_now, to_iso):
             "INSERT OR IGNORE INTO permissions (role, permission) VALUES (?,?)",
             [(role, p) for p in perms],
         )
+    if not development_mode:
+        profile = db.execute("SELECT value FROM system_config WHERE key='bootstrap_profile'").fetchone()
+        if profile and profile["value"] == "dev_defaults_v1":
+            raise RuntimeError(
+                "Development default credentials detected in non-development runtime. Reinitialize DB with secure bootstrap credentials."
+            )
+        risky_usernames = {"agent01", "supervisor01", "hr01", "admin01"}
+        found = {
+            row[0]
+            for row in db.execute(
+                "SELECT username FROM users WHERE username IN ('agent01','supervisor01','hr01','admin01')"
+            ).fetchall()
+        }
+        if found == risky_usernames:
+            raise RuntimeError(
+                "Default MetroOps seed users detected in non-development runtime. Replace credentials and remove default accounts."
+            )
     db.commit()
     db.close()

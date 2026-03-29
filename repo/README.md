@@ -47,54 +47,153 @@ You should receive an HTML response for the login page.
 python -m pip install -r requirements.txt
 ```
 
-2. Run with local TLS (self-signed):
+2. Choose one runtime mode and use the matching startup command.
+
+Development/local mode (recommended for first run)
+
+- Required: `METROOPS_RUNTIME_ENV=development`
+- Optional: `FLASK_SECRET` (auto-generated if omitted in development mode)
+
+PowerShell:
+
+```powershell
+$env:METROOPS_RUNTIME_ENV='development'
+python -m app.app
+```
+
+bash (macOS/Linux/Git Bash):
 
 ```bash
+export METROOPS_RUNTIME_ENV=development
 python -m app.app
 ```
 
-If you need to run local HTTP (non-TLS) for development-only testing, explicitly set development runtime mode before disabling TLS enforcement:
-
-Windows CMD:
-
-```bat
-set METROOPS_RUNTIME_ENV=development
-set DISABLE_TLS_ENFORCEMENT=1
-python -m app.app
-```
+Development local HTTP mode (no TLS; only for local testing)
 
 PowerShell:
 
 ```powershell
 $env:METROOPS_RUNTIME_ENV='development'
 $env:DISABLE_TLS_ENFORCEMENT='1'
+$env:SESSION_COOKIE_SECURE='0'
 python -m app.app
 ```
 
-macOS/Linux:
+bash (macOS/Linux/Git Bash):
 
 ```bash
 export METROOPS_RUNTIME_ENV=development
 export DISABLE_TLS_ENFORCEMENT=1
+export SESSION_COOKIE_SECURE=0
 python -m app.app
 ```
 
-In production-like runtime modes (`production`, default when unset), `DISABLE_TLS_ENFORCEMENT=1` is rejected at startup.
+Production-like local mode (security checks enforced)
 
-Enable debug mode only when needed:
+- Required: `METROOPS_RUNTIME_ENV=production`
+- Required: `FLASK_SECRET`
+- Required on first run for DB bootstrap: `METROOPS_BOOTSTRAP_ADMIN_PASSWORD` (>=12 chars)
+- Optional: `METROOPS_BOOTSTRAP_ADMIN_USERNAME` (defaults to `admin`)
 
-```bash
-set FLASK_DEBUG=1
+PowerShell:
+
+```powershell
+$env:METROOPS_RUNTIME_ENV='production'
+$env:FLASK_SECRET='replace-with-strong-secret'
+$env:METROOPS_BOOTSTRAP_ADMIN_PASSWORD='replace-with-strong-admin-password'
+python -m app.app
 ```
 
-3. Open `https://localhost:5000`.
+bash (macOS/Linux/Git Bash):
+
+```bash
+export METROOPS_RUNTIME_ENV=production
+export FLASK_SECRET='replace-with-strong-secret'
+export METROOPS_BOOTSTRAP_ADMIN_PASSWORD='replace-with-strong-admin-password'
+python -m app.app
+```
+
+Notes:
+
+- In development/test/local runtime with `DISABLE_TLS_ENFORCEMENT=1`, the app forces non-secure session cookies for local HTTP continuity and logs a warning.
+- In production-like runtime (`production`, default when unset), `DISABLE_TLS_ENFORCEMENT=1` is rejected at startup.
+
+3. Open `https://localhost:5000/login` (or `http://localhost:5000/login` when running local HTTP mode).
+
+## Frontend Verification Quick Path
+
+1. Start app in development mode:
+
+PowerShell:
+
+```powershell
+$env:METROOPS_RUNTIME_ENV='development'
+python -m app.app
+```
+
+bash:
+
+```bash
+export METROOPS_RUNTIME_ENV=development
+python -m app.app
+```
+
+2. Open `https://localhost:5000/login` and sign in (dev seed account example: `supervisor01` / `MetroOpsPass!02`).
+3. Sanity-check these pages:
+   - `/dashboard`
+   - `/kiosk`
+   - `/depot/manage`
+   - `/notes`
+
+## Social Features UI
+
+- Where to find controls:
+  - Dashboard quick action panel: `/dashboard` (Social Actions panel).
+  - Profile-level controls with state: `/profiles/<user_id>` (Follow/Unfollow, Favorite, Like, Block, Report).
+- Quick manual verification:
+  1. Login as `agent01` and open `/profiles/2`.
+  2. Click **Follow** and confirm status feedback updates.
+  3. Login as `supervisor01`, follow `agent01`, then switch back to `agent01` and refresh `/profiles/2`.
+  4. Confirm **Mutual follow active** appears and follow control shows **Unfollow**.
+  5. Try **Block** or **Report** and confirm success/error feedback appears in the status area.
+- Test command:
+  - `./run_tests.sh`
+  - PowerShell: `./run_tests.ps1`
+
+## Kiosk Session Attribution
+
+- Purpose:
+  - Kiosk bookings remain anonymous (shared `kiosk_rider` account) while adding per-browser-session traceability.
+- Stored attribution fields:
+  - `seat_holds.kiosk_session_id`
+  - `bookings.kiosk_session_id`
+  - `analytics_events.metadata` for `booking_confirmed` includes `kiosk_session_id`
+- Behavior:
+  - Kiosk hold/confirm accepts optional `kiosk_session_id`.
+  - If omitted, server generates a safe fallback session ID and returns it in API responses.
+  - The same session ID propagates hold -> confirm -> booking analytics metadata.
+- Quick verification:
+  1. Open `/kiosk` and create a hold.
+  2. Confirm booking.
+  3. Verify responses include `kiosk_session_id`.
+  4. Run tests to verify DB propagation and fallback behavior.
 
 ## Seed Accounts
+
+Development/test runtime seeds the following local accounts:
 
 - `agent01` / `MetroOpsPass!01`
 - `supervisor01` / `MetroOpsPass!02`
 - `hr01` / `MetroOpsPass!03`
 - `admin01` / `MetroOpsPass!04`
+
+Production-like runtime does not seed default accounts. First run requires:
+
+- `FLASK_SECRET`
+- `METROOPS_BOOTSTRAP_ADMIN_PASSWORD` (min 12 chars)
+- optional `METROOPS_BOOTSTRAP_ADMIN_USERNAME` (defaults to `admin`)
+
+The app fails startup if development default credentials are detected in non-development runtime.
 
 ## Security Controls Implemented
 
@@ -167,10 +266,10 @@ Booking rules are DB-backed and audit-logged (`config_audit_log`) with safe defa
 4. Set Bin ID `1` to unfrozen and retry allocation (expect success).
 5. Click **Refresh Hierarchy** and confirm `current_cuft`/`current_lb` increased for that bin.
 
-## Optional Browser Integration Test
+## Browser Integration Tests
 
 Offline banner browser test is in `API_tests/test_browser_offline_banner.py`.
-It runs when Playwright is installed and is skipped otherwise.
+It is required in CI (`CI=1`) and skipped locally when Playwright is not installed.
 
 Playwright setup (optional):
 
@@ -184,10 +283,38 @@ Non-browser offline signaling coverage is also included in `API_tests/test_ui_an
 
 ## Verification (Acceptance-Focused)
 
-- Run all automated checks:
+- Run all automated checks (canonical cross-platform):
 
 ```bash
-python -m pytest unit_tests API_tests
+./run_tests.sh
+```
+
+PowerShell canonical command:
+
+```powershell
+./run_tests.ps1
+```
+
+PowerShell helper (recommended on Windows):
+
+```powershell
+./run_tests.ps1
+```
+
+If your environment has restrictive temp/cache permissions, pre-create runtime dirs and run:
+
+PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .pytest_runtime,.pytest_runtime\tmp,.pytest_runtime\cache | Out-Null
+./run_tests.ps1
+```
+
+bash:
+
+```bash
+mkdir -p .pytest_runtime/tmp .pytest_runtime/cache
+./run_tests.sh
 ```
 
 - Includes checks for:
@@ -233,8 +360,51 @@ python -m app.app
 Cross-platform (Windows/Linux/macOS):
 
 ```bash
-python -m pytest unit_tests API_tests
+./run_tests.sh
 ```
+
+Windows PowerShell:
+
+```powershell
+./run_tests.ps1
+```
+
+Linux/macOS/Git Bash:
+
+```bash
+./run_tests.sh
+```
+
+If pytest temp/cache directory permissions are restrictive:
+
+```bash
+./run_tests.sh
+```
+
+## Troubleshooting Startup Errors
+
+- `RuntimeError: FLASK_SECRET must be explicitly set in non-development runtime`
+  - Cause: running in production-like mode without `FLASK_SECRET`.
+  - Fix: set `METROOPS_RUNTIME_ENV=development` for local quick start, or set `FLASK_SECRET` for production-like mode.
+
+- `Non-development bootstrap requires METROOPS_BOOTSTRAP_ADMIN_PASSWORD ...`
+  - Cause: first run in production-like mode without bootstrap admin password.
+  - Fix: set `METROOPS_BOOTSTRAP_ADMIN_PASSWORD` (>=12 chars), optionally `METROOPS_BOOTSTRAP_ADMIN_USERNAME`.
+
+- `Development default credentials detected in non-development runtime...`
+  - Cause: DB was initialized with dev seed users, then runtime switched to production-like.
+  - Fix: reinitialize with production-like bootstrap env vars and a fresh DB.
+
+## Troubleshooting Test Runner (WinError 5)
+
+- `PermissionError: [WinError 5] Access is denied` during pytest temp/cache cleanup.
+  - Cause: restrictive filesystem policy or locked temp directories.
+  - Fix:
+    1. Use repo-local runtime dirs and helper script: `./run_tests.ps1`.
+    2. If needed, pre-create writable dirs and use explicit basetemp:
+       - `New-Item -ItemType Directory -Force -Path .pytest_runtime,.pytest_runtime\tmp,.pytest_runtime\cache | Out-Null`
+       - `./run_tests.ps1`
+  - Recovery: close IDE/file-indexer handles on `.pytest_runtime` and rerun.
 
 Bash helper script (Linux/macOS or Git Bash):
 

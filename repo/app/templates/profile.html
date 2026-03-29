@@ -15,4 +15,32 @@
     <p>Face identifier (masked): {{ masked_face }}</p>
   {% endif %}
 </section>
+
+{% if viewer_id != owner.id %}
+<section class="panel" id="profile-social-actions" data-target-user-id="{{ owner.id }}">
+  <h3>Social Actions</h3>
+  <div class="stack inline">
+    <button
+      type="button"
+      id="profile-social-follow"
+      data-social-profile-action
+      data-relation="{{ 'unfollow' if relation_state.following else 'follow' }}">
+      {{ 'Unfollow' if relation_state.following else 'Follow' }}
+    </button>
+    <button type="button" id="profile-social-favorite" data-social-profile-action data-relation="favorite">
+      {{ 'Favorited' if relation_state.favorited else 'Favorite' }}
+    </button>
+    <button type="button" id="profile-social-like" data-social-profile-action data-relation="like">
+      {{ 'Liked' if relation_state.liked else 'Like' }}
+    </button>
+    <button type="button" id="profile-social-block" data-social-profile-action data-relation="block">
+      {{ 'Blocked' if relation_state.blocked else 'Block' }}
+    </button>
+    <button type="button" id="profile-social-report" data-social-profile-action data-relation="report">
+      {{ 'Reported' if relation_state.reported else 'Report' }}
+    </button>
+  </div>
+  <p id="profile-social-status" class="hint" role="status" aria-live="polite"></p>
+</section>
+{% endif %}
 {% endblock %}

@@ -1,6 +1,7 @@
 __pycache__/
 .pytest_cache/
 .tmp/
+.pytest_tmp/
 *.pyc
 data/*.db
 data/*.sqlite
@@ -9,3 +10,4 @@ data/*.key
 data/attachments/*
 !data/attachments/.keep
 .env
+.pytest_runtime/
