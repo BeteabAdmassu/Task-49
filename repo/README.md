@@ -4,15 +4,17 @@ Offline-first Flask + HTMX portal for reservations, service visibility, depot lo
 
 ## Docker Quick Start
 
-From the project root (the folder that contains `docker-compose.yml`), start everything with:
+All project runtime files belong under `repo/`. Run Docker commands from `repo/` (the folder that contains `docker-compose.yml`).
 
 1. Optional (recommended for consistency): create `.env` from `.env.example` and adjust values.
 
-Windows CMD: `copy .env.example .env`
+Windows CMD (from workspace root): `copy repo\.env.example repo\.env`
 
-PowerShell: `Copy-Item .env.example .env`
+PowerShell (from workspace root): `Copy-Item repo/.env.example repo/.env`
 
-macOS/Linux: `cp .env.example .env`
+macOS/Linux (from workspace root): `cp repo/.env.example repo/.env`
+
+If you are already inside `repo/`, the equivalent command is `cp .env.example .env` (or PowerShell/CMD equivalent).
 
 2. Start all services:
 
@@ -61,12 +63,16 @@ $env:METROOPS_RUNTIME_ENV='development'
 python -m app.app
 ```
 
+URL: `https://localhost:5000/login`
+
 bash (macOS/Linux/Git Bash):
 
 ```bash
 export METROOPS_RUNTIME_ENV=development
 python -m app.app
 ```
+
+URL: `https://localhost:5000/login`
 
 Development local HTTP mode (no TLS; only for local testing)
 
@@ -79,6 +85,8 @@ $env:SESSION_COOKIE_SECURE='0'
 python -m app.app
 ```
 
+URL: `http://localhost:5000/login`
+
 bash (macOS/Linux/Git Bash):
 
 ```bash
@@ -87,6 +95,8 @@ export DISABLE_TLS_ENFORCEMENT=1
 export SESSION_COOKIE_SECURE=0
 python -m app.app
 ```
+
+URL: `http://localhost:5000/login`
 
 Production-like local mode (security checks enforced)
 
@@ -118,7 +128,9 @@ Notes:
 - In development/test/local runtime with `DISABLE_TLS_ENFORCEMENT=1`, the app forces non-secure session cookies for local HTTP continuity and logs a warning.
 - In production-like runtime (`production`, default when unset), `DISABLE_TLS_ENFORCEMENT=1` is rejected at startup.
 
-3. Open `https://localhost:5000/login` (or `http://localhost:5000/login` when running local HTTP mode).
+3. Open the mode-matching URL:
+   - HTTPS mode: `https://localhost:5000/login`
+   - HTTP mode (`DISABLE_TLS_ENFORCEMENT=1`): `http://localhost:5000/login`
 
 ### Local TLS Certificates (Optional Explicit Certs)
 
@@ -140,7 +152,9 @@ python -c "from app.app import app; app.run(host='0.0.0.0', port=5000, ssl_conte
 
 ## Frontend Verification Quick Path
 
-1. Start app in development mode:
+1. Start app in one supported local mode.
+
+HTTPS mode (default development):
 
 PowerShell:
 
@@ -156,7 +170,31 @@ export METROOPS_RUNTIME_ENV=development
 python -m app.app
 ```
 
-2. Open `https://localhost:5000/login` and sign in (dev seed account example: `supervisor01` / `MetroOpsPass!02`).
+Verify at: `https://localhost:5000/login`
+
+HTTP mode (explicit local test mode):
+
+PowerShell:
+
+```powershell
+$env:METROOPS_RUNTIME_ENV='development'
+$env:DISABLE_TLS_ENFORCEMENT='1'
+$env:SESSION_COOKIE_SECURE='0'
+python -m app.app
+```
+
+bash:
+
+```bash
+export METROOPS_RUNTIME_ENV=development
+export DISABLE_TLS_ENFORCEMENT=1
+export SESSION_COOKIE_SECURE=0
+python -m app.app
+```
+
+Verify at: `http://localhost:5000/login`
+
+2. Open the mode-matching login URL and sign in (dev seed account example: `supervisor01` / `MetroOpsPass!02`).
 3. Sanity-check these pages:
    - `/dashboard`
    - `/kiosk`

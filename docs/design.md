@@ -1,6 +1,7 @@
 # Design Document
 
 ## Architecture
+
 - **Runtime:** Single-node offline-first Flask application with SQLite as the local system of record.
 - **UI pattern:** HTMX-driven dashboards for in-place updates every 10 seconds; no full page reload required.
 - **Offline behavior:** Browser heartbeat every 10 seconds; failed heartbeats show `Offline—showing last known data` while leaving forms/actions available for local entry.
@@ -10,6 +11,7 @@
 - **Governance visibility:** HR/Admin reports page aggregates 7-day risk-event categories.
 
 ## Tech Stack
+
 - Flask (web UI + REST-style endpoints)
 - HTMX (partial updates)
 - SQLite (reservations, logistics, notes, social graph, experiments, analytics)
@@ -17,7 +19,8 @@
 - Markdown (learning record rendering support)
 
 ## Database Schema
-- **Auth & governance:** `users`, `permissions`, `sessions_nonce`, `risk_events`, `refresh_attempts`
+
+- **Auth & governance:** `users`, `permissions`, `sessions_nonce`, `risk_events`, `refresh_attempts`, `refresh_cadence`, `abuse_attempts`, `system_config`, `config_audit_log`
 - **Transport operations:** `routes`, `departures`, `schedules`, `vehicle_pings`
 - **Reservation engine:** `seat_holds`, `bookings`, `rate_plans`
 - **Depot logistics:** `warehouses`, `zones`, `bins`, `inventory_items`
@@ -26,7 +29,8 @@
 - **Experiments & analytics:** `experiments`, `experiment_assignments`, `analytics_events`, `ranking_samples`
 
 ## Key Rule Implementations
-- Seat hold timeout fixed at 8 minutes.
+
+- Seat hold timeout defaults to 8 minutes and is configuration-backed (`system_config`) with guarded update APIs and audit logging.
 - Booking window enforced: minimum 2 hours before departure, maximum 30 days ahead.
 - Hard inventory cap enforced via `BEGIN IMMEDIATE` transaction + seat availability check (never below zero).
 - ETA fallback to scheduled mode when no ping for over 2 minutes.
@@ -37,6 +41,7 @@
 - HTMX is served from local static assets to preserve full offline behavior.
 
 ## Maintainability Notes
+
 - Database schema/seed/migration bootstrap is isolated in `repo/app/db_bootstrap.py`.
 - Collaboration routes are isolated in `repo/app/routes_collab.py` to reduce domain coupling in the app entry file.
 - Booking/depot/service-visibility routes are isolated in `repo/app/routes_ops.py`.

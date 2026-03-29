@@ -585,4 +585,14 @@ app.init_db()
 
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(host="0.0.0.0", port=5000, debug=debug_mode, ssl_context="adhoc")
+    use_http = app.config.get("DISABLE_TLS_ENFORCEMENT", False) and app.config.get("RUNTIME_ENV") in {
+        "development",
+        "dev",
+        "local",
+        "test",
+        "testing",
+    }
+    if use_http:
+        app.run(host="0.0.0.0", port=5000, debug=debug_mode)
+    else:
+        app.run(host="0.0.0.0", port=5000, debug=debug_mode, ssl_context="adhoc")
