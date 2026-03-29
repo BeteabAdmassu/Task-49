@@ -205,6 +205,8 @@ def test_dashboard_recommendation_widget_telemetry_hooks_present(tmp_path):
     assert "/api/analytics/recommendation-event" in body
     assert "rec_impression" in body
     assert "rec_click" in body
+    assert 'document.body.addEventListener("htmx:timeout"' in body
+    assert "syncPollingState" in body
 
 
 def test_dashboard_social_actions_ui_and_wiring_present(tmp_path):
@@ -1325,6 +1327,41 @@ def test_geospatial_implied_speed_anomaly_detection(tmp_path):
             "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE '%implied_mph=%'"
         ).fetchone()[0]
         assert rows >= 1
+
+
+def test_gps_anomaly_threshold_not_triggered_under_85_mph(tmp_path):
+    client, app = build_client(tmp_path)
+    login_supervisor(client)
+
+    csv_data = (
+        "vehicle_id,route_id,stop_sequence,speed_mph,ping_time,lat,lon\n"
+        "V3,1,1,20,2026-01-01T00:00:00+00:00,40.0,-74.0\n"
+        "V3,1,1,20,2026-01-01T01:00:00+00:00,40.7,-74.0\n"
+    )
+    upload = authed_post(
+        client,
+        "/api/vehicle-pings/upload",
+        data={"file": (BytesIO(csv_data.encode("utf-8")), "pings_safe_geo.csv")},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    with app.app_context():
+        rows = app.get_db().execute(
+            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE 'vehicle=V3%'"
+        ).fetchone()[0]
+        assert rows == 0
+
+
+def test_authenticated_html_routes_send_no_store_cache_headers(tmp_path):
+    client, _app = build_client(tmp_path)
+    login_agent(client)
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert dashboard.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate"
+    assert dashboard.headers.get("Pragma") == "no-cache"
+    assert dashboard.headers.get("Expires") == "0"
 
 
 def test_lan_gateway_ingestion_and_csrf_protection(tmp_path):

@@ -212,6 +212,45 @@ def test_concurrent_holds_prevent_overbooking(tmp_path):
 
     assert sorted(results) == [200, 409]
 
+    with app.app_context():
+        db = app.get_db()
+        remaining = db.execute(
+            "SELECT total_seats - COALESCE((SELECT SUM(seats) FROM seat_holds WHERE departure_id=? AND status='active'),0) - COALESCE((SELECT SUM(seats) FROM bookings WHERE departure_id=? AND status='confirmed'),0) FROM departures WHERE id=?",
+            (dep_id, dep_id, dep_id),
+        ).fetchone()[0]
+        assert remaining == 0
+
+
+def test_login_lockout_persists_across_app_reload(tmp_path):
+    client, app = build_client(tmp_path)
+
+    for _ in range(5):
+        bad = client.post("/login", data={"username": "agent01", "password": "WrongPass!"}, follow_redirects=False)
+        assert bad.status_code == 302
+
+    locked = client.post("/login", data={"username": "agent01", "password": "MetroOpsPass!01"}, follow_redirects=False)
+    assert locked.status_code == 302
+    assert "/login" in (locked.headers.get("Location") or "")
+
+    with app.app_context():
+        lockout_until = app.get_db().execute("SELECT lockout_until FROM users WHERE username='agent01'").fetchone()[0]
+        assert lockout_until
+
+    module = importlib.import_module("app.app")
+    module = importlib.reload(module)
+    app_reloaded = module.create_app()
+    app_reloaded.testing = True
+    app_reloaded.config["DISABLE_TLS_ENFORCEMENT"] = True
+    client_reloaded = app_reloaded.test_client()
+
+    still_locked = client_reloaded.post(
+        "/login",
+        data={"username": "agent01", "password": "MetroOpsPass!01"},
+        follow_redirects=False,
+    )
+    assert still_locked.status_code == 302
+    assert "/login" in (still_locked.headers.get("Location") or "")
+
 
 def test_pricing_deterministic_edge_rounding_and_discount(tmp_path):
     client, app = build_client(tmp_path)

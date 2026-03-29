@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="panel">
-  <h2>Rider Kiosk</h2>
+  <h2>Rider Kiosk <span id="kiosk-exp-badge" class="badge">vA</span></h2>
+  <p>Recommendation variant: <strong id="kiosk-exp-label">Loading...</strong></p>
   <div class="stack inline">
     <label>Route
       <select id="route-code">
@@ -27,8 +28,9 @@
     </label>
     <label>Bundle Days <input id="booking-bundle-days" type="number" min="1" value="1"></label>
     <label>Contact <input id="booking-contact" placeholder="email or phone"></label>
-    <button onclick="startHold()">Hold Seat ({{ hold_timeout_minutes }} min)</button>
+    <button id="booking-hold-button" onclick="startHold()">Hold Seat ({{ hold_timeout_minutes }} min)</button>
     <div id="booking-status" class="hint"></div>
+    <span id="booking-inline-error" class="hint" role="alert"></span>
     <button id="confirm-booking-btn" onclick="confirmBooking()" disabled>Confirm Booking</button>
   </div>
 </section>
@@ -53,6 +55,10 @@
     document.getElementById("booking-status").textContent = message;
   }
 
+  function setInlineError(message) {
+    document.getElementById("booking-inline-error").textContent = message || "";
+  }
+
   function startCountdown() {
     if (countdownTimer) clearInterval(countdownTimer);
     countdownTimer = setInterval(() => {
@@ -70,6 +76,13 @@
   }
 
   async function startHold() {
+    const holdButton = document.getElementById("booking-hold-button");
+    if (holdButton.disabled) {
+      return;
+    }
+    holdButton.disabled = true;
+    setInlineError("");
+    setBookingStatus("Submitting hold request...");
     const payload = {
       departure_id: Number(document.getElementById("booking-departure-id").value),
       seats: Number(document.getElementById("booking-seats").value || 1),
@@ -84,8 +97,10 @@
     });
     const data = await response.json();
     if (!response.ok) {
+      setInlineError(data.error || "Unable to hold seat.");
       setBookingStatus(data.error || "Unable to hold seat.");
       document.getElementById("confirm-booking-btn").disabled = true;
+      holdButton.disabled = false;
       return;
     }
 
@@ -93,6 +108,8 @@
     kioskSessionId = data.kiosk_session_id || kioskSessionId;
     holdDeadlineMs = Date.parse(data.expires_at);
     document.getElementById("confirm-booking-btn").disabled = false;
+    holdButton.disabled = false;
+    setInlineError("");
     startCountdown();
   }
 
@@ -109,6 +126,7 @@
     });
     const nonceData = await nonceRes.json();
     if (!nonceRes.ok) {
+      setInlineError(nonceData.error || "Nonce request failed.");
       setBookingStatus(nonceData.error || "Nonce request failed.");
       return;
     }
@@ -125,6 +143,7 @@
     });
     const confirmData = await confirmRes.json();
     if (!confirmRes.ok) {
+      setInlineError(confirmData.error || "Booking confirmation failed.");
       setBookingStatus(confirmData.error || "Booking confirmation failed.");
       return;
     }
@@ -132,6 +151,7 @@
     activeHoldNonce = null;
     kioskSessionId = confirmData.kiosk_session_id || kioskSessionId;
     document.getElementById("confirm-booking-btn").disabled = true;
+    setInlineError("");
     if (countdownTimer) clearInterval(countdownTimer);
     setBookingStatus(`Booking confirmed. Total: $${confirmData.total_price}`);
     searchDepartures();

@@ -134,3 +134,11 @@ def register_security_guards(app, deps):
             db = get_db()
             cleanup_expired_holds(db)
             db.commit()
+
+    @app.after_request
+    def cache_control_headers(response):
+        if session.get("user_id") and request.method == "GET" and response.mimetype == "text/html":
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response

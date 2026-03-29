@@ -297,6 +297,11 @@ CREATE TABLE IF NOT EXISTS ranking_samples (
 
 
 def _ensure_migrations(db):
+    user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "failed_attempts" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0")
+    if "lockout_until" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN lockout_until TEXT")
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS refresh_cadence (

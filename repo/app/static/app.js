@@ -23,6 +23,19 @@ if (csrfToken && typeof window.fetch === "function") {
 function setOffline(isOffline) {
   if (!offlineBanner) return;
   offlineBanner.classList.toggle("hidden", !isOffline);
+  syncPollingState();
+}
+
+function syncPollingState() {
+  const pollingTargets = document.querySelectorAll('[hx-trigger*="every 10s"]');
+  const offline = offlineBanner && !offlineBanner.classList.contains("hidden");
+  pollingTargets.forEach((element) => {
+    if (offline) {
+      element.setAttribute("hx-disable", "true");
+    } else {
+      element.removeAttribute("hx-disable");
+    }
+  });
 }
 
 async function heartbeat() {
@@ -46,6 +59,7 @@ setInterval(heartbeat, 10000);
 
 document.body.addEventListener("htmx:responseError", () => setOffline(true));
 document.body.addEventListener("htmx:sendError", () => setOffline(true));
+document.body.addEventListener("htmx:timeout", () => setOffline(true));
 document.body.addEventListener("htmx:configRequest", (event) => {
   if (csrfToken) {
     event.detail.headers["X-CSRF-Token"] = csrfToken;
@@ -72,10 +86,36 @@ async function emitRecommendationTelemetry(eventType, widgetKey, variantLabel) {
   });
 }
 
+async function loadExperimentPresentation(widgetKey) {
+  const labelNode = document.getElementById("exp-label");
+  const badgeNode = document.getElementById("exp-badge");
+  const kioskBadgeNode = document.getElementById("kiosk-exp-badge");
+  const kioskLabelNode = document.getElementById("kiosk-exp-label");
+  try {
+    const response = await fetch(`/api/experiments/assign/${encodeURIComponent(widgetKey)}`, {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    const data = await response.json();
+    const label = data.label || "Version A";
+    const variantCode = data.variant || (label.includes("B") ? "B" : "A");
+    if (labelNode) labelNode.textContent = label;
+    if (kioskLabelNode) kioskLabelNode.textContent = label;
+    if (badgeNode) badgeNode.textContent = `v${variantCode}`;
+    if (kioskBadgeNode) kioskBadgeNode.textContent = `v${variantCode}`;
+    return { label, variantCode };
+  } catch (_err) {
+    if (labelNode) labelNode.textContent = "Version A";
+    if (kioskLabelNode) kioskLabelNode.textContent = "Version A";
+    if (badgeNode) badgeNode.textContent = "vA";
+    if (kioskBadgeNode) kioskBadgeNode.textContent = "vA";
+    return { label: "Version A", variantCode: "A" };
+  }
+}
+
 function initRecommendationWidgetTelemetry() {
   const widget = document.getElementById("recommendation-widget");
-  const labelNode = document.getElementById("exp-label");
-  if (!widget || !labelNode) return;
+  if (!widget) return;
 
   const widgetKey = widget.dataset.widgetKey || "suggested-times";
   let variantLabel = "Version A";
@@ -87,18 +127,9 @@ function initRecommendationWidgetTelemetry() {
     void emitRecommendationTelemetry("rec_impression", widgetKey, variantLabel);
   };
 
-  fetch(`/api/experiments/assign/${encodeURIComponent(widgetKey)}`, {
-    credentials: "same-origin",
-    cache: "no-store",
-  })
-    .then((response) => response.json())
-    .then((data) => {
-      variantLabel = data.label || "Version A";
-      labelNode.textContent = variantLabel;
-    })
-    .catch(() => {
-      variantLabel = "Version A";
-      labelNode.textContent = variantLabel;
+  loadExperimentPresentation(widgetKey)
+    .then(({ label }) => {
+      variantLabel = label;
     })
     .finally(() => {
       if (typeof window.IntersectionObserver === "function") {
@@ -124,6 +155,7 @@ function initRecommendationWidgetTelemetry() {
 }
 
 initRecommendationWidgetTelemetry();
+void loadExperimentPresentation("suggested-times");
 
 async function submitSocialAction(targetUserId, relation) {
   const response = await fetch("/api/social/action", {

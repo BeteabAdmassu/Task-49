@@ -136,9 +136,10 @@ def create_app():
 
     def get_db():
         if "db" not in g:
-            g.db = sqlite3.connect(DB_PATH)
+            g.db = sqlite3.connect(DB_PATH, timeout=10.0)
             g.db.row_factory = sqlite3.Row
             g.db.execute("PRAGMA foreign_keys = ON")
+            g.db.execute("PRAGMA busy_timeout = 10000")
         return g.db
 
     @app.teardown_appcontext
@@ -368,7 +369,7 @@ def create_app():
             kiosk_session_id = None
 
         db = get_db()
-        db.execute("BEGIN IMMEDIATE")
+        db.execute("BEGIN EXCLUSIVE")
         try:
             departure = db.execute("SELECT * FROM departures WHERE id=?", (departure_id,)).fetchone()
             if not departure:
@@ -436,7 +437,7 @@ def create_app():
             return None, {"error": msg}, 409
 
         db = get_db()
-        db.execute("BEGIN IMMEDIATE")
+        db.execute("BEGIN EXCLUSIVE")
         try:
             cleanup_expired_holds(db)
             hold = db.execute(

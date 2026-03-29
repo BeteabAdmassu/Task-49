@@ -120,6 +120,24 @@ Notes:
 
 3. Open `https://localhost:5000/login` (or `http://localhost:5000/login` when running local HTTP mode).
 
+### Local TLS Certificates (Optional Explicit Certs)
+
+Flask can run with adhoc TLS by default, but you can also generate explicit local cert files.
+
+PowerShell (requires OpenSSL in PATH):
+
+```powershell
+openssl req -x509 -newkey rsa:2048 -keyout local-key.pem -out local-cert.pem -days 365 -nodes -subj "/CN=localhost"
+python -c "from app.app import app; app.run(host='0.0.0.0', port=5000, ssl_context=('local-cert.pem','local-key.pem'))"
+```
+
+bash:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout local-key.pem -out local-cert.pem -days 365 -nodes -subj "/CN=localhost"
+python -c "from app.app import app; app.run(host='0.0.0.0', port=5000, ssl_context=('local-cert.pem','local-key.pem'))"
+```
+
 ## Frontend Verification Quick Path
 
 1. Start app in development mode:
