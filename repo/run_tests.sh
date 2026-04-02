@@ -13,12 +13,11 @@ if ! python -c "import flask, pytest" 2>/dev/null; then
   pip install -q -r requirements.txt
 fi
 
-# ── Guard: Playwright required in CI ───────────────────────────────────────
-if [[ "${CI:-}" == "1" ]]; then
-  if ! python -c "from playwright.sync_api import sync_playwright" 2>/dev/null; then
-    echo "[run_tests] ERROR: Playwright is required in CI. Run: pip install playwright && playwright install chromium" >&2
-    exit 1
-  fi
+# ── Install Playwright if missing ──────────────────────────────────────────
+if ! python -c "from playwright.sync_api import sync_playwright" 2>/dev/null; then
+  echo "[run_tests] Installing Playwright..."
+  pip install -q playwright
+  playwright install --with-deps chromium
 fi
 
 # ── Stable temp/cache paths ────────────────────────────────────────────────
