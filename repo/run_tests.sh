@@ -7,10 +7,10 @@ if [[ ! -d "app" || ! -d "unit_tests" || ! -d "API_tests" ]]; then
   exit 1
 fi
 
-# ── Guard: Python must be available ────────────────────────────────────────
+# ── Install dependencies if missing ────────────────────────────────────────
 if ! python -c "import flask, pytest" 2>/dev/null; then
-  echo "[run_tests] ERROR: Missing dependencies. Run: pip install -r requirements.txt" >&2
-  exit 1
+  echo "[run_tests] Installing dependencies..."
+  pip install -q -r requirements.txt
 fi
 
 # ── Guard: Playwright required in CI ───────────────────────────────────────
